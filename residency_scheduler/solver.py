@@ -173,9 +173,10 @@ def _validate_inputs(
 		if str(row.work_date) not in valid_dates:
 			errors.append(f"Locked assignment date {row.work_date} is outside the schedule period.")
 
-	for work_date, group in locked.groupby("work_date") if not locked.empty else []:
-		if len(group) > required_count:
-			errors.append(f"{work_date} has {len(group)} locked assignments but only requires {required_count} resident(s).")
+	if not locked.empty:
+		for work_date, group in locked.groupby("work_date"):
+			if len(group) > required_count:
+				errors.append(f"{work_date} has {len(group)} locked assignments but only requires {required_count} resident(s).")
 
 	if not locked.empty and not availability.empty:
 		hard_types = {"vacation", "unavailable", "approved_absence", "medical_leave"}
