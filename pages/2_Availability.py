@@ -72,9 +72,13 @@ edited = st.data_editor(
 )
 
 if st.button("Save availability", type="primary"):
-	replace_availability(period_id, edited)
-	st.success("Availability/preferences saved.")
-	st.rerun()
+	try:
+		replace_availability(period_id, edited)
+	except ValueError as exc:
+		st.error(str(exc))
+	else:
+		st.success("Availability/preferences saved.")
+		st.rerun()
 
 st.markdown(
 	"""

@@ -8,6 +8,7 @@ import pandas as pd
 from ortools.sat.python import cp_model
 
 from residency_scheduler.repository import (
+	HARD_UNAVAILABLE_TYPES,
 	get_availability,
 	get_locked_assignments,
 	get_period,
@@ -60,10 +61,9 @@ def solve_period(period_id: int, max_time_seconds: int = 30) -> SolverResult:
 		model.Add(sum(works[(resident_id, work_date)] for resident_id in resident_ids) == required_count)
 
 	# Hard unavailable dates.
-	hard_types = {"vacation", "unavailable", "approved_absence", "medical_leave"}
 	hard_unavailable = availability[
 		(availability["priority"].str.lower() == "hard")
-		& (availability["availability_type"].str.lower().isin(hard_types))
+		& (availability["availability_type"].str.lower().isin(HARD_UNAVAILABLE_TYPES))
 	]
 	for row in hard_unavailable.itertuples():
 		model.Add(works[(int(row.resident_id), str(row.work_date))] == 0)
@@ -122,6 +122,7 @@ def solve_period(period_id: int, max_time_seconds: int = 30) -> SolverResult:
 
 	solver = cp_model.CpSolver()
 	solver.parameters.max_time_in_seconds = max_time_seconds
+	solver.parameters.num_search_workers = 1
 	status = solver.Solve(model)
 	status_name = solver.StatusName(status)
 
@@ -167,25 +168,70 @@ def _validate_inputs(
 	valid_residents = set(residents["id"].astype(int).tolist())
 	valid_dates = {item.isoformat() for item in dates}
 
+	for row in availability.itertuples():
+		if int(row.resident_id) not in valid_residents:
+			errors.append(f"Availability references inactive/missing resident_id {row.resident_id}.")
+		if str(row.work_date) not in valid_dates:
+			errors.append(f"Availability date {row.work_date} is outside the schedule period.")
+
 	for row in locked.itertuples():
 		if int(row.resident_id) not in valid_residents:
 			errors.append(f"Locked assignment references inactive/missing resident_id {row.resident_id}.")
 		if str(row.work_date) not in valid_dates:
 			errors.append(f"Locked assignment date {row.work_date} is outside the schedule period.")
 
+	if required_count > len(valid_residents):
+		errors.append(
+			f"Each date requires {required_count} resident(s), but only {len(valid_residents)} active resident(s) exist."
+		)
+
+	total_required = len(dates) * required_count
+	configured_capacity = 0
+	has_unbounded_capacity = False
+	for row in residents.itertuples():
+		if pd.notna(row.max_shifts):
+			configured_capacity += int(row.max_shifts)
+		else:
+			has_unbounded_capacity = True
+	if not has_unbounded_capacity and configured_capacity < total_required:
+		errors.append(
+			f"Configured max shifts allow only {configured_capacity} total assignment(s), but the period requires {total_required}."
+		)
+
 	if not locked.empty:
 		for work_date, group in locked.groupby("work_date"):
 			if len(group) > required_count:
 				errors.append(f"{work_date} has {len(group)} locked assignments but only requires {required_count} resident(s).")
 
+		for resident_id, group in locked.groupby("resident_id"):
+			matches = residents.loc[residents["id"].astype(int) == int(resident_id), "max_shifts"]
+			if not matches.empty and pd.notna(matches.iloc[0]) and len(group) > int(matches.iloc[0]):
+				errors.append(
+					f"resident_id {resident_id} has {len(group)} locked assignment(s), exceeding max_shifts {int(matches.iloc[0])}."
+				)
+
 	if not locked.empty and not availability.empty:
-		hard_types = {"vacation", "unavailable", "approved_absence", "medical_leave"}
 		hard = availability[
 			(availability["priority"].str.lower() == "hard")
-			& (availability["availability_type"].str.lower().isin(hard_types))
+			& (availability["availability_type"].str.lower().isin(HARD_UNAVAILABLE_TYPES))
 		]
 		conflicts = locked.merge(hard, on=["resident_id", "work_date"], suffixes=("_lock", "_availability"))
 		for row in conflicts.itertuples():
 			errors.append(f"Locked assignment conflict: resident_id {row.resident_id} is locked on {row.work_date} but marked hard unavailable.")
+
+	if not availability.empty:
+		hard = availability[
+			(availability["priority"].str.lower() == "hard")
+			& (availability["availability_type"].str.lower().isin(HARD_UNAVAILABLE_TYPES))
+		]
+		for work_date in valid_dates:
+			unavailable_residents = set(
+				hard.loc[hard["work_date"].astype(str) == work_date, "resident_id"].astype(int).tolist()
+			)
+			available_count = len(valid_residents - unavailable_residents)
+			if available_count < required_count:
+				errors.append(
+					f"{work_date} has only {available_count} available resident(s), but requires {required_count}."
+				)
 
 	return errors

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 
@@ -7,9 +8,19 @@ DB_DIR = Path("data")
 DB_PATH = DB_DIR / "residency_scheduler.sqlite"
 
 
+def get_db_path() -> Path:
+	"""Return the active SQLite database path.
+
+	Tests can set RESIDENCY_SCHEDULER_DB to isolate themselves from a user's
+	local app database.
+	"""
+	return Path(os.environ.get("RESIDENCY_SCHEDULER_DB", str(DB_PATH)))
+
+
 def get_connection() -> sqlite3.Connection:
-	DB_DIR.mkdir(parents=True, exist_ok=True)
-	conn = sqlite3.connect(DB_PATH)
+	db_path = get_db_path()
+	db_path.parent.mkdir(parents=True, exist_ok=True)
+	conn = sqlite3.connect(db_path)
 	conn.row_factory = sqlite3.Row
 	conn.execute("PRAGMA foreign_keys = ON;")
 	return conn
@@ -91,5 +102,9 @@ def init_db() -> None:
 				warnings_json TEXT,
 				FOREIGN KEY (period_id) REFERENCES schedule_periods(id) ON DELETE CASCADE
 			);
+
+			CREATE INDEX IF NOT EXISTS idx_availability_period_date ON availability(period_id, work_date);
+			CREATE INDEX IF NOT EXISTS idx_locked_period_date ON locked_assignments(period_id, work_date);
+			CREATE INDEX IF NOT EXISTS idx_assignments_period_date ON assignments(period_id, work_date);
 			"""
 		)

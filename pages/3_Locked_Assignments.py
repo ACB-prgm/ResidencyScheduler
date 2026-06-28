@@ -64,8 +64,12 @@ edited = st.data_editor(
 )
 
 if st.button("Save locked assignments", type="primary"):
-	replace_locked_assignments(period_id, edited)
-	st.success("Locked assignments saved.")
-	st.rerun()
+	try:
+		replace_locked_assignments(period_id, edited)
+	except ValueError as exc:
+		st.error(str(exc))
+	else:
+		st.success("Locked assignments saved.")
+		st.rerun()
 
 st.info("Locked assignments become hard constraints. If a locked assignment conflicts with vacation/hard unavailable, schedule generation will fail validation.")

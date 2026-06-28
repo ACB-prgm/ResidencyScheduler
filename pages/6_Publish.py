@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from residency_scheduler.calendar.google_calendar import build_calendar_events_preview
+from residency_scheduler.calendar.google_calendar import build_calendar_events_preview, google_calendar_setup_instructions
 from residency_scheduler.db import init_db
 from residency_scheduler.repository import get_assignments, get_period, get_schedule_periods
 
@@ -32,4 +32,6 @@ st.markdown("### Event preview")
 events = build_calendar_events_preview(assignments)
 st.dataframe(events, use_container_width=True, hide_index=True)
 
-st.warning("Google Calendar write/publish is not implemented yet. This page currently previews event payloads only.")
+st.markdown("### Publishing setup")
+st.info(google_calendar_setup_instructions())
+st.warning("This page currently previews event payloads only. The calendar module supports upsert publishing once an authenticated Google Calendar service is wired in.")

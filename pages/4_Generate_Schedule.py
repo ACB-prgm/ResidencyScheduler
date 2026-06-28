@@ -3,7 +3,7 @@ from __future__ import annotations
 import streamlit as st
 
 from residency_scheduler.db import init_db
-from residency_scheduler.repository import get_assignments, get_schedule_periods
+from residency_scheduler.repository import get_assignments, get_schedule_periods, get_schedule_runs
 from residency_scheduler.solver import solve_period
 
 init_db()
@@ -44,3 +44,8 @@ if not assignments.empty:
 	st.dataframe(assignments, use_container_width=True, hide_index=True)
 else:
 	st.info("No assignments have been generated for this period yet.")
+
+runs = get_schedule_runs(period_id)
+if not runs.empty:
+	st.markdown("### Recent solver runs")
+	st.dataframe(runs.head(5), use_container_width=True, hide_index=True)
