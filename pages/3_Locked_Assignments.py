@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import date
+
 import pandas as pd
 import streamlit as st
 
@@ -43,7 +45,7 @@ if existing.empty:
 	existing = pd.DataFrame(
 		[
 			{
-				"work_date": f"{int(period_row.year)}-{int(period_row.month):02d}-01",
+				"work_date": date(int(period_row.year), int(period_row.month), 1),
 				"resident_id": int(residents.iloc[0]["id"]),
 				"reason": "",
 			}
@@ -51,6 +53,7 @@ if existing.empty:
 	)
 else:
 	existing = existing[["work_date", "resident_id", "reason"]]
+	existing["work_date"] = pd.to_datetime(existing["work_date"]).dt.date
 
 edited = st.data_editor(
 	existing,

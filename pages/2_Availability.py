@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import date
+
 import pandas as pd
 import streamlit as st
 
@@ -40,11 +42,12 @@ st.dataframe(residents[["id", "name", "email"]], use_container_width=True, hide_
 
 existing = get_availability(period_id)
 if existing.empty:
+	period_row = periods.loc[periods["id"] == period_id].iloc[0]
 	existing = pd.DataFrame(
 		[
 			{
 				"resident_id": list(resident_options.values())[0],
-				"work_date": f"{periods.loc[periods['id'] == period_id, 'year'].iloc[0]}-{periods.loc[periods['id'] == period_id, 'month'].iloc[0]:02d}-01",
+				"work_date": date(int(period_row.year), int(period_row.month), 1),
 				"availability_type": "prefer_off",
 				"priority": "soft",
 				"reason": "",
@@ -53,6 +56,7 @@ if existing.empty:
 	)
 else:
 	existing = existing[["resident_id", "work_date", "availability_type", "priority", "reason"]]
+	existing["work_date"] = pd.to_datetime(existing["work_date"]).dt.date
 
 edited = st.data_editor(
 	existing,
