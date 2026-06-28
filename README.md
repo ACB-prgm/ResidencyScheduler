@@ -2,46 +2,27 @@
 
 Local-first MVP for generating monthly medical residency night-shift schedules.
 
-The initial design uses:
+The app uses:
 
 - Streamlit for the UI
 - SQLite for local persistence
 - Google OR-Tools CP-SAT for schedule optimization
-- Google Calendar API for publishing approved schedules
+- FullCalendar schedule review and local ICS export
 
-## Scheduling scope
-
-Initial assumptions:
+## Scheduling Scope
 
 - One night shift per calendar day
 - Shift time: 6:00 PM to 7:00 AM the next day
-- One resident required per night by default
-- Vacation / hard unavailable dates must be honored
-- Locked preassignments must not be moved
-- Preferences are soft constraints
-- Workload should be distributed as evenly as possible
+- `required_count` residents required per night, defaulting to one
+- Each month can have multiple named drafts
+- Schedule requests support single dates and date ranges
+- Vacation, unavailable, approved absence, medical leave, and assign requests default to hard priority
+- Prefer off and prefer work requests default to soft priority
+- Vacation ranges automatically add a soft prefer-work request for the Thursday before vacation starts when that date is in the same draft month
+- Generic weekday-count rules support requirements such as exactly two Fridays for a resident
+- Workload, weekend shifts, preferences, and back-to-back shifts are optimized where possible
 
-## Project structure
-
-```text
-app.py
-pages/
-	1_Residents.py
-	2_Availability.py
-	3_Locked_Assignments.py
-	4_Generate_Schedule.py
-	5_Review.py
-	6_Publish.py
-residency_scheduler/
-	db.py
-	repository.py
-	solver.py
-	calendar/google_calendar.py
-scripts/
-	init_db.py
-```
-
-## Local setup
+## Local Setup
 
 ```bash
 python -m venv .venv
@@ -49,6 +30,12 @@ source .venv/bin/activate
 pip install -r requirements.txt
 python scripts/init_db.py
 streamlit run app.py
+```
+
+Or use the local launcher after activating your environment:
+
+```bash
+bash scripts/run_app.sh
 ```
 
 On Windows PowerShell:
@@ -61,27 +48,66 @@ python scripts\init_db.py
 streamlit run app.py
 ```
 
-## Data storage
+## Data Storage
 
-The app stores local data in:
+By default, the app stores local data in:
 
 ```text
 data/residency_scheduler.sqlite
 ```
 
-The database is intentionally ignored by git.
+Set `RESIDENCY_SCHEDULER_DB` to use another SQLite file. Tests use this override to avoid touching the local app database.
 
-## MVP workflow
+Database files, credentials, tokens, virtual environments, and build artifacts are ignored by git.
 
-1. Create/select a schedule period.
-2. Maintain resident roster.
-3. Enter hard exceptions, vacations, and preferences.
-4. Enter locked manual assignments.
-5. Generate schedule.
-6. Review fairness and preference violations.
-7. Manually adjust if needed.
-8. Approve and publish to Google Calendar.
+## MVP Workflow
 
-## Current status
+1. Create/select a year-month and named draft.
+2. Maintain resident roster. Existing resident IDs are preserved; removed rows are marked inactive.
+3. Enter availability, preferences, vacation ranges, and hard assignments using resident-name dropdowns.
+4. Enter special weekday-count rules.
+5. Generate schedule with OR-Tools.
+6. Review the FullCalendar view, assignments, workload, weekend distribution, and prefer-off violations.
+7. Manually reassign unlocked generated shifts with hard-constraint validation.
+8. Download an ICS file for manual calendar import.
 
-This repository contains the initial application skeleton and development plan. The solver is intentionally simple but structured so constraint logic can be extended without rewriting the UI.
+## Solver Notes
+
+Hard constraints:
+
+- Every night must be covered.
+- Hard unavailable/vacation/approved absence/medical leave request ranges are honored.
+- Hard assign requests are honored.
+- Hard assign requests cannot exceed required coverage for a date.
+- Residents cannot exceed configured `max_shifts`.
+- Hard weekday-count rules are enforced exactly.
+
+Soft objective weights:
+
+- Total workload is distributed by floor/ceiling fairness first.
+- Sat/Sun weekend workload is distributed by floor/ceiling fairness first.
+- Higher resident weights are protected from surplus total and weekend shifts where feasible.
+- Prefer-off violation: 100
+- Prefer-work miss: 10
+- Back-to-back shift: 40
+- Soft weekday-count deviation: 60
+
+The solver validates common infeasible inputs before solving and records each run in `schedule_runs`.
+
+## Calendar Export
+
+The Generate Schedule page provides a downloadable `.ics` file for manual import into Google Calendar or another calendar app.
+
+- ICS exports use stable assignment-based UIDs.
+- The file is an import artifact, not a live subscribed calendar feed.
+- Re-import behavior is handled by the target calendar application.
+
+See `.env.example` for optional local configuration.
+
+## Tests
+
+```bash
+python -m pytest -q
+```
+
+The test suite covers named drafts, seeded calendar months, request date ranges, vacation-derived Thursday preferences, hard assign requests, max-shift infeasibility, soft preferences, weekday-count rules, calendar summaries, manual edits, and Streamlit page smoke tests.

@@ -1,201 +1,129 @@
 # Residency Scheduler Development Plan
 
-## Product goal
+## Product Goal
 
-Build a local-first scheduling application that generates fair monthly night-shift schedules for medical residents, supports hard exceptions and soft preferences, allows scheduler review/manual adjustment, and publishes the approved schedule to Google Calendar.
+Build a local-first scheduling application that generates fair monthly night-shift schedules for medical residents, supports hard requests and soft preferences, allows scheduler review/manual adjustment, and exports approved schedules as ICS calendar files.
 
-## Guiding principles
-
-- Hard constraints must never be violated.
-- Soft constraints should be scored and explainable.
-- The UI should make conflicts obvious before solving.
-- Manual edits should be validated immediately.
-- Calendar publishing must be idempotent and avoid duplicate events.
-- The scheduling engine should be isolated from the UI so constraints can evolve.
-
-## MVP architecture
+## Current Architecture
 
 ```text
 Streamlit UI
-	Forms and editable tables
-	Review dashboards
-	Approval/publish workflow
+	Home page for year-month and named draft creation
+	Resident roster page
+	Availability and Preferences page
+	Special Rules page
+	Generate page with FullCalendar review, manual edits, and ICS export
 
 SQLite
+	Calendar months seeded for the next 10 years
 	Residents
-	Schedule periods
-	Availability/preferences
-	Locked assignments
+	Named schedule drafts
+	Schedule requests
+	Special rules
 	Generated assignments
 	Solver run audit records
 
 Python solver
 	OR-Tools CP-SAT
+	Expanded request ranges
 	Hard constraints
 	Soft fairness/preference objective
+	Weekday-count rules
 
-Google Calendar module
-	OAuth/service-account integration later
-	Upsert events using stored Google event IDs
+Calendar export module
+	FullCalendar event builder
+	ICS file builder for local downloads
 ```
 
-## Phase 1 — Local skeleton
+## Completed MVP Work
 
-Status: initial skeleton.
+### Draft Workflow
 
-Deliverables:
+Status: complete.
 
-- Repository structure
-- SQLite schema
-- Basic Streamlit navigation
-- Resident roster page
-- Availability/preference page
-- Locked assignments page
-- Basic solver page
-- Review page
-- Calendar publishing placeholder
+- Calendar months are seeded for the next 10 years.
+- Multiple named drafts can exist for the same year-month.
+- Pages that operate on schedules use shared Year-Month and Draft selectors.
+- Drafts store required nightly coverage.
 
-Acceptance criteria:
+### Availability and Preferences
 
-- App runs locally with `streamlit run app.py`.
-- Database initializes automatically.
-- User can enter residents.
-- User can enter hard/soft availability records.
-- User can enter locked assignments.
-- User can generate assignments for a month.
-- Assignments are saved to SQLite.
+Status: complete.
 
-## Phase 2 — Solver correctness
+- Availability, preferences, vacation ranges, and hard assignments are represented as schedule requests.
+- Request rows use resident-name dropdowns instead of raw resident IDs.
+- Requests support `start_date` and `end_date`.
+- Empty request tables do not create placeholder records.
+- Request priorities default by type and can be overridden.
+- Vacation ranges derive a soft prefer-work request for the Thursday before vacation starts when applicable.
 
-Deliverables:
+### Solver Correctness
 
-- Pre-solve validation layer
-- Hard constraint enforcement
-- Fairness objective tuning
-- Weekend balancing
-- Preference violation scoring
-- Locked assignment conflict detection
-- Basic infeasibility explanations
+Status: MVP complete, with future tuning expected.
 
-Hard constraints:
+Hard constraints implemented:
 
-- Every night covered.
-- Hard unavailable/vacation dates honored.
-- Locked assignments honored.
-- No resident exceeds max monthly shifts when configured.
-- Locked assignments cannot exceed required coverage for a date.
+- Every night is covered.
+- Hard unavailable/vacation/approved absence/medical leave ranges are honored.
+- Hard assign requests are honored.
+- Hard assign requests cannot exceed required coverage for a date.
+- Residents cannot exceed configured max monthly shifts.
+- Hard weekday-count rules are enforced exactly.
 
-Soft constraints:
+Soft constraints implemented:
 
-- Minimize total shift imbalance.
-- Minimize weekend imbalance.
-- Minimize prefer-off violations.
+- Fairly distribute total shifts using floor/ceiling targets.
+- Fairly distribute Sat/Sun weekend shifts using floor/ceiling targets.
+- Protect higher-weight residents from surplus total and weekend shifts where feasible.
+- Penalize prefer-off violations.
 - Reward prefer-work matches.
 - Avoid back-to-back night shifts where possible.
+- Penalize soft weekday-count rule deviation.
 
-Acceptance criteria:
+### Review, Manual Adjustment, and Export
 
-- Solver produces feasible schedules for normal cases.
-- Solver rejects impossible schedules with clear messages.
-- Fairness summary is shown per resident.
-- Preference violations are visible.
+Status: complete.
 
-## Phase 3 — Review and manual adjustment
+- Generate page shows assignments in a FullCalendar month view.
+- Generate page shows assignment rows, workload summary, and prefer-off violations.
+- Unlocked assignments can be manually reassigned.
+- Manual edits validate hard constraints before saving.
+- Manual edits can optionally create hard assign requests.
+- Generate page exports assignments as an ICS file for manual calendar import.
 
-Deliverables:
+### Calendar Publishing
 
-- Calendar-style schedule review
-- Resident workload report
-- Weekend/holiday distribution report
-- Manual reassignment workflow
-- Constraint validation after edit
-- Ability to mark manual edits as locked
+Status: complete for local export.
 
-Acceptance criteria:
+- ICS export uses one 6:00 PM-7:00 AM event per assignment.
+- API-based Google Calendar publishing is intentionally out of scope to avoid embedded credentials and OAuth server maintenance.
 
-- User can reassign a date.
-- App warns or blocks hard-constraint violations.
-- Fairness metrics recalculate after edits.
-- Manual edits persist.
+## Test Coverage
 
-## Phase 4 — Google Calendar publishing
+Implemented tests cover:
 
-Deliverables:
+- Multiple drafts for one year-month.
+- Calendar month seeding.
+- Empty schedule request table behavior.
+- Resident dropdown label to ID mapping.
+- Date-range vacation blocking.
+- Vacation-derived Thursday prefer-work.
+- Hard assign request honoring and conflicts.
+- Too many hard assign requests on one date.
+- Max-shift infeasibility.
+- Preference-heavy feasible schedules.
+- Back-to-back avoidance.
+- Exactly-two-Fridays weekday-count rule.
+- Manual reassignment with assign request creation.
+- Calendar summary output.
+- Streamlit page smoke loading.
 
-- Google OAuth setup instructions
-- Calendar ID configuration
-- Event creation for approved assignments
-- Store `google_event_id` on assignments
-- Update existing events instead of duplicating
-- Optional delete/rebuild period sync mode
+## Remaining Follow-Up Work
 
-Event format:
-
-```text
-Summary: Night Shift - Dr. Resident Name
-Start:  YYYY-MM-DD 18:00
-End:    YYYY-MM-DD+1 07:00
-Description:
-	Generated by Residency Scheduler
-	Resident: <name>
-	Schedule period: <period_id>
-```
-
-Acceptance criteria:
-
-- Approved schedule publishes to one configured Google Calendar.
-- Re-publishing does not create duplicate events.
-- Stored event IDs can be used for updates.
-
-## Phase 5 — Packaging
-
-Deliverables:
-
-- Launcher script
-- PyInstaller build spec
-- Local executable build
-- First-run data directory creation
-- Backup/export flow
-
-Acceptance criteria:
-
-- User can run the app without manually starting Streamlit.
-- App opens browser to local Streamlit URL.
-- SQLite database persists between launches.
-
-## Phase 6 — Hardening
-
-Deliverables:
-
-- CSV import/export
-- Database migration strategy
-- Unit tests for solver scenarios
-- Seed/demo data
-- Better error handling
-- Structured logging
-- Config page
-
-Recommended test cases:
-
-- All residents available.
-- One resident has vacation.
-- Locked assignment conflicts with vacation.
-- Too many locked shifts for one resident.
-- Impossible schedule due to hard unavailability.
-- Preference-heavy but feasible schedule.
-- Back-to-back avoidance with limited residents.
-
-## Future web/PWA migration path
-
-The local Streamlit app proves the scheduling model. If multi-user resident preference entry becomes necessary, migrate to:
-
-```text
-Frontend: React / Next.js PWA
-Backend: FastAPI
-Database: Postgres
-Solver: Python OR-Tools worker
-Auth: Google OAuth or hospital SSO
-Calendar: Google Calendar API
-```
-
-The solver, schema concepts, and validation logic should carry forward with minimal changes.
+- Add CSV import/export for residents, requests, rules, and assignments.
+- Add seed/demo data.
+- Add holiday labeling and holiday-specific distribution reporting.
+- Add richer calendar styling and event filtering.
+- Add structured logging.
+- Add a configuration page for default time zone and shift times.
+- Add packaged executable support with PyInstaller or a similar tool.
