@@ -30,7 +30,7 @@ pages/
 	2_Availability.py
 	3_Locked_Assignments.py
 	4_Generate_Schedule.py
-	5_Review_Schedule.py
+	5_Review.py
 	6_Publish.py
 residency_scheduler/
 	db.py
