@@ -96,6 +96,7 @@ def init_db() -> None:
 				resident_id INTEGER NOT NULL,
 				rule_type TEXT NOT NULL,
 				weekday INTEGER NOT NULL,
+				paired_weekday INTEGER,
 				comparator TEXT NOT NULL,
 				target_count INTEGER NOT NULL,
 				priority TEXT NOT NULL,
@@ -166,6 +167,7 @@ def _prepare_schema(conn: sqlite3.Connection) -> None:
 	conn.execute("DROP TABLE IF EXISTS availability")
 	conn.execute("DROP TABLE IF EXISTS locked_assignments")
 	_prepare_resident_schema(conn)
+	_prepare_schedule_rule_schema(conn)
 
 	if not _table_exists(conn, "schedule_periods"):
 		return
@@ -210,6 +212,15 @@ def _prepare_schema(conn: sqlite3.Connection) -> None:
 	conn.execute("DROP TABLE schedule_periods_old")
 	conn.execute("PRAGMA foreign_keys = ON")
 	_repair_schedule_period_foreign_keys(conn)
+
+
+def _prepare_schedule_rule_schema(conn: sqlite3.Connection) -> None:
+	if not _table_exists(conn, "schedule_rules"):
+		return
+
+	columns = {row["name"] for row in conn.execute("PRAGMA table_info(schedule_rules)").fetchall()}
+	if "paired_weekday" not in columns:
+		conn.execute("ALTER TABLE schedule_rules ADD COLUMN paired_weekday INTEGER")
 
 
 def _repair_schedule_period_foreign_keys(conn: sqlite3.Connection) -> None:

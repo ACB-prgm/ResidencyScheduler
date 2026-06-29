@@ -115,6 +115,30 @@ def create_schedule_period(
 		return int(cursor.fetchone()[0])
 
 
+def rename_schedule_period(period_id: int, draft_name: str) -> None:
+	draft_name = draft_name.strip()
+	if not draft_name:
+		raise ValueError("Draft name is required.")
+	with get_connection() as conn:
+		cursor = conn.execute(
+			"""
+			UPDATE schedule_periods
+			SET draft_name = ?
+			WHERE id = ?
+			""",
+			(draft_name, int(period_id)),
+		)
+		if cursor.rowcount == 0:
+			raise ValueError(f"Schedule period #{period_id} was not found.")
+
+
+def delete_schedule_period(period_id: int) -> None:
+	with get_connection() as conn:
+		cursor = conn.execute("DELETE FROM schedule_periods WHERE id = ?", (int(period_id),))
+		if cursor.rowcount == 0:
+			raise ValueError(f"Schedule period #{period_id} was not found.")
+
+
 def get_period(period_id: int) -> dict:
 	with get_connection() as conn:
 		row = conn.execute("SELECT * FROM schedule_periods WHERE id = ?", (period_id,)).fetchone()
@@ -165,7 +189,7 @@ def save_residents(df: pd.DataFrame) -> None:
 	clean["id"] = pd.to_numeric(clean["id"], errors="coerce").astype("Int64")
 	clean["max_shifts"] = pd.to_numeric(clean["max_shifts"], errors="coerce").astype("Int64")
 	clean["min_shifts"] = pd.to_numeric(clean["min_shifts"], errors="coerce").astype("Int64")
-	clean["weight"] = pd.to_numeric(clean["weight"], errors="coerce").fillna(1.0)
+	clean["weight"] = pd.to_numeric(clean["weight"], errors="coerce").fillna(1.0).round().clip(lower=1, upper=5).astype(int)
 	clean["color"] = clean["color"].fillna("").astype(str).str.strip().str.upper()
 	clean["active"] = clean["active"].fillna(1).astype(int)
 	_validate_resident_colors(clean)
@@ -190,7 +214,7 @@ def save_residents(df: pd.DataFrame) -> None:
 					INSERT INTO residents (name, email, max_shifts, min_shifts, weight, color, active)
 					VALUES (?, ?, ?, ?, ?, ?, ?)
 					""",
-					(row.name, row.email, max_shifts, min_shifts, float(row.weight), color or None, int(row.active)),
+					(row.name, row.email, max_shifts, min_shifts, int(row.weight), color or None, int(row.active)),
 				)
 				new_resident_id = int(cursor.lastrowid)
 				if not color:
@@ -219,7 +243,7 @@ def save_residents(df: pd.DataFrame) -> None:
 					active = ?, updated_at = CURRENT_TIMESTAMP
 				WHERE id = ?
 				""",
-				(row.name, row.email, max_shifts, min_shifts, float(row.weight), color, int(row.active), resident_id),
+				(row.name, row.email, max_shifts, min_shifts, int(row.weight), color, int(row.active), resident_id),
 			)
 
 		for resident_id in existing_ids - seen_ids:
@@ -345,11 +369,11 @@ def get_schedule_rules(period_id: int) -> pd.DataFrame:
 	return read_sql(
 		"""
 		SELECT sr.id, sr.period_id, sr.resident_id, r.name AS resident_name,
-			sr.rule_type, sr.weekday, sr.comparator, sr.target_count, sr.priority, sr.reason
+			sr.rule_type, sr.weekday, sr.paired_weekday, sr.comparator, sr.target_count, sr.priority, sr.reason
 		FROM schedule_rules sr
 		JOIN residents r ON r.id = sr.resident_id
 		WHERE sr.period_id = ?
-		ORDER BY r.name, sr.weekday, sr.rule_type
+		ORDER BY r.name, sr.weekday, sr.paired_weekday, sr.rule_type
 		""",
 		(period_id,),
 	)
@@ -357,17 +381,28 @@ def get_schedule_rules(period_id: int) -> pd.DataFrame:
 
 def get_schedule_rules_for_editor(period_id: int) -> pd.DataFrame:
 	rules = get_schedule_rules(period_id)
-	columns = ["resident", "rule_type", "weekday", "comparator", "target_count", "priority", "reason"]
+	columns = ["resident", "rule_type", "weekday", "paired_weekday", "comparator", "target_count", "priority", "reason"]
 	if rules.empty:
 		return pd.DataFrame(columns=columns)
 
 	rules["resident"] = rules["resident_name"] + " · resident #" + rules["resident_id"].astype(str)
 	rules["weekday"] = rules["weekday"].map(WEEKDAY_NAMES)
+	rules["paired_weekday"] = rules["paired_weekday"].map(WEEKDAY_NAMES)
 	return rules[columns]
 
 
 def replace_schedule_rules(period_id: int, df: pd.DataFrame) -> None:
-	columns = ["resident", "resident_id", "rule_type", "weekday", "comparator", "target_count", "priority", "reason"]
+	columns = [
+		"resident",
+		"resident_id",
+		"rule_type",
+		"weekday",
+		"paired_weekday",
+		"comparator",
+		"target_count",
+		"priority",
+		"reason",
+	]
 	clean = _ensure_columns(df, columns)
 	if clean.empty:
 		with get_connection() as conn:
@@ -379,9 +414,12 @@ def replace_schedule_rules(period_id: int, df: pd.DataFrame) -> None:
 	for row in clean.itertuples(index=False):
 		resident_id = _resolve_resident_id(row, resident_options)
 		rule_type = str(row.rule_type or "weekday_count").strip().lower()
-		if rule_type != "weekday_count":
-			raise ValueError("Only weekday_count rules are supported.")
+		if rule_type not in {"weekday_count", "weekday_pair_count"}:
+			raise ValueError("Only weekday_count and weekday_pair_count rules are supported.")
 		weekday = _coerce_weekday(row.weekday)
+		paired_weekday = None
+		if rule_type == "weekday_pair_count":
+			paired_weekday = _coerce_weekday(row.paired_weekday)
 		comparator = str(row.comparator or "exactly").strip().lower()
 		if comparator != "exactly":
 			raise ValueError("Only exactly rules are supported.")
@@ -391,14 +429,16 @@ def replace_schedule_rules(period_id: int, df: pd.DataFrame) -> None:
 		priority = str(row.priority or "hard").strip().lower()
 		if priority not in PRIORITIES:
 			raise ValueError(f"Invalid priority '{row.priority}'.")
-		rows.append((period_id, resident_id, rule_type, weekday, comparator, target_count, priority, row.reason or ""))
+		rows.append((period_id, resident_id, rule_type, weekday, paired_weekday, comparator, target_count, priority, row.reason or ""))
 
 	with get_connection() as conn:
 		conn.execute("DELETE FROM schedule_rules WHERE period_id = ?", (period_id,))
 		conn.executemany(
 			"""
-			INSERT INTO schedule_rules (period_id, resident_id, rule_type, weekday, comparator, target_count, priority, reason)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			INSERT INTO schedule_rules (
+				period_id, resident_id, rule_type, weekday, paired_weekday, comparator, target_count, priority, reason
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 			""",
 			rows,
 		)
@@ -408,7 +448,13 @@ def get_assignments(period_id: int) -> pd.DataFrame:
 	return read_sql(
 		"""
 		SELECT a.id, a.period_id, a.work_date, a.resident_id, r.name AS resident_name,
-			r.color AS resident_color, a.source, a.is_locked, a.google_event_id
+			r.color AS resident_color,
+			CASE
+				WHEN CAST(ROUND(r.weight) AS INTEGER) < 1 THEN 1
+				WHEN CAST(ROUND(r.weight) AS INTEGER) > 5 THEN 5
+				ELSE CAST(ROUND(r.weight) AS INTEGER)
+			END AS resident_pgy,
+			a.source, a.is_locked, a.google_event_id
 		FROM assignments a
 		JOIN residents r ON r.id = a.resident_id
 		WHERE a.period_id = ?
@@ -416,6 +462,57 @@ def get_assignments(period_id: int) -> pd.DataFrame:
 		""",
 		(period_id,),
 	)
+
+
+def get_prior_assignment_history(period_id: int, months: int = 3) -> pd.DataFrame:
+	period = get_period(period_id)
+	columns = ["period_id", "year", "month", "resident_id", "work_date", "is_weekend"]
+	if months < 1:
+		return pd.DataFrame(columns=columns)
+
+	selected_period_ids = []
+	cursor_month = date(int(period["year"]), int(period["month"]), 1)
+	with get_connection() as conn:
+		for _ in range(months):
+			cursor_month = _previous_month(cursor_month)
+			row = conn.execute(
+				"""
+				SELECT sp.id
+				FROM schedule_periods sp
+				WHERE sp.year = ?
+					AND sp.month = ?
+					AND EXISTS (
+						SELECT 1
+						FROM assignments a
+						WHERE a.period_id = sp.id
+					)
+				ORDER BY sp.id DESC
+				LIMIT 1
+				""",
+				(cursor_month.year, cursor_month.month),
+			).fetchone()
+			if row is not None:
+				selected_period_ids.append(int(row["id"]))
+
+	if not selected_period_ids:
+		return pd.DataFrame(columns=columns)
+
+	placeholders = ",".join("?" for _ in selected_period_ids)
+	history = read_sql(
+		f"""
+		SELECT sp.id AS period_id, sp.year, sp.month, a.resident_id, a.work_date,
+			CASE
+				WHEN CAST(strftime('%w', a.work_date) AS INTEGER) IN (0, 6) THEN 1
+				ELSE 0
+			END AS is_weekend
+		FROM schedule_periods sp
+		JOIN assignments a ON a.period_id = sp.id
+		WHERE sp.id IN ({placeholders})
+		ORDER BY sp.year, sp.month, a.work_date, a.resident_id
+		""",
+		tuple(selected_period_ids),
+	)
+	return history[columns]
 
 
 def _validate_resident_colors(df: pd.DataFrame) -> None:
@@ -504,6 +601,72 @@ def update_assignment_resident(
 					str(current["work_date"]),
 					lock_reason or "Manual review edit",
 				),
+			)
+
+
+def swap_assignment_residents(
+	first_assignment_id: int,
+	second_assignment_id: int,
+	make_locked: bool = False,
+	lock_reason: str | None = None,
+) -> None:
+	if int(first_assignment_id) == int(second_assignment_id):
+		raise ValueError("Select two different assignments to swap.")
+
+	with get_connection() as conn:
+		first = conn.execute("SELECT * FROM assignments WHERE id = ?", (int(first_assignment_id),)).fetchone()
+		second = conn.execute("SELECT * FROM assignments WHERE id = ?", (int(second_assignment_id),)).fetchone()
+
+	if first is None or second is None:
+		raise ValueError("Both assignments must exist before they can be swapped.")
+	if int(first["period_id"]) != int(second["period_id"]):
+		raise ValueError("Assignments must belong to the same draft.")
+	if int(first["is_locked"]) == 1 or int(second["is_locked"]) == 1:
+		raise ValueError("Hard assigned shifts cannot be swapped.")
+	if int(first["resident_id"]) == int(second["resident_id"]):
+		raise ValueError("Select assignments with different residents to swap.")
+
+	_validate_manual_assignment(
+		int(first["period_id"]),
+		str(second["work_date"]),
+		int(first["resident_id"]),
+		exclude_assignment_ids=[int(first["id"]), int(second["id"])],
+	)
+	_validate_manual_assignment(
+		int(first["period_id"]),
+		str(first["work_date"]),
+		int(second["resident_id"]),
+		exclude_assignment_ids=[int(first["id"]), int(second["id"])],
+	)
+
+	with get_connection() as conn:
+		conn.execute(
+			"""
+			UPDATE assignments
+			SET resident_id = ?, source = 'manual', is_locked = ?, updated_at = CURRENT_TIMESTAMP
+			WHERE id = ?
+			""",
+			(int(second["resident_id"]), int(make_locked), int(first["id"])),
+		)
+		conn.execute(
+			"""
+			UPDATE assignments
+			SET resident_id = ?, source = 'manual', is_locked = ?, updated_at = CURRENT_TIMESTAMP
+			WHERE id = ?
+			""",
+			(int(first["resident_id"]), int(make_locked), int(second["id"])),
+		)
+		if make_locked:
+			reason = lock_reason or "Manual review swap"
+			conn.executemany(
+				"""
+				INSERT INTO schedule_requests (period_id, resident_id, start_date, end_date, request_type, priority, reason)
+				VALUES (?, ?, ?, ?, 'assign', 'hard', ?)
+				""",
+				[
+					(int(first["period_id"]), int(second["resident_id"]), str(first["work_date"]), str(first["work_date"]), reason),
+					(int(second["period_id"]), int(first["resident_id"]), str(second["work_date"]), str(second["work_date"]), reason),
+				],
 			)
 
 
@@ -669,12 +832,23 @@ def _previous_thursday(start: date) -> date:
 	return start - timedelta(days=days_back)
 
 
+def _previous_month(month_start: date) -> date:
+	if month_start.month == 1:
+		return date(month_start.year - 1, 12, 1)
+	return date(month_start.year, month_start.month - 1, 1)
+
+
 def _validate_manual_assignment(
 	period_id: int,
 	work_date: str,
 	resident_id: int,
 	exclude_assignment_id: int | None = None,
+	exclude_assignment_ids: list[int] | None = None,
 ) -> None:
+	excluded_ids = set(exclude_assignment_ids or [])
+	if exclude_assignment_id is not None:
+		excluded_ids.add(int(exclude_assignment_id))
+
 	valid_dates = set(period_dates(period_id))
 	if work_date not in valid_dates:
 		raise ValueError("Assignment date is outside the selected draft month.")
@@ -695,9 +869,10 @@ def _validate_manual_assignment(
 	with get_connection() as conn:
 		params: list[object] = [period_id, work_date, resident_id]
 		exclude = ""
-		if exclude_assignment_id is not None:
-			exclude = "AND id <> ?"
-			params.append(exclude_assignment_id)
+		if excluded_ids:
+			placeholders = ",".join("?" for _ in excluded_ids)
+			exclude = f"AND id NOT IN ({placeholders})"
+			params.extend(sorted(excluded_ids))
 		duplicate = conn.execute(
 			f"""
 			SELECT id FROM assignments
@@ -713,9 +888,10 @@ def _validate_manual_assignment(
 		if resident is not None and resident["max_shifts"] is not None:
 			count_params: list[object] = [period_id, resident_id]
 			exclude_count = ""
-			if exclude_assignment_id is not None:
-				exclude_count = "AND id <> ?"
-				count_params.append(exclude_assignment_id)
+			if excluded_ids:
+				placeholders = ",".join("?" for _ in excluded_ids)
+				exclude_count = f"AND id NOT IN ({placeholders})"
+				count_params.extend(sorted(excluded_ids))
 			current_total = conn.execute(
 				f"""
 				SELECT COUNT(*) FROM assignments

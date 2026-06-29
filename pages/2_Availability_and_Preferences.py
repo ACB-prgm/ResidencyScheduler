@@ -14,7 +14,7 @@ from residency_scheduler.repository import (
 	get_schedule_requests_for_editor,
 	replace_schedule_requests,
 )
-from residency_scheduler.ui import select_period
+from residency_scheduler.ui import flash_success, render_flash_messages, select_period
 
 EDITOR_KEY = "schedule_requests_editor"
 EDITOR_DATA_KEY = "schedule_requests_editor_data"
@@ -54,6 +54,7 @@ init_db()
 
 st.title("Availability and Preferences")
 st.caption("Enter availability, preferences, vacation ranges, and hard preassignments for a draft.")
+render_flash_messages()
 
 period_id = select_period("requests")
 residents = get_residents(active_only=True)
@@ -103,7 +104,8 @@ if st.button("Save availability and preferences", type="primary"):
 	except ValueError as exc:
 		st.error(str(exc))
 	else:
-		st.success("Availability and preferences saved.")
+		flash_success("Availability and preferences saved.")
+		st.session_state[EDITOR_PERIOD_KEY] = None
 		st.rerun()
 
 st.markdown(

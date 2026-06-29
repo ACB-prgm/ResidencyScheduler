@@ -7,6 +7,7 @@ from urllib.parse import quote
 from residency_scheduler.colors import RESIDENT_COLOR_PALETTE
 from residency_scheduler.db import init_db
 from residency_scheduler.repository import get_residents, save_residents
+from residency_scheduler.ui import flash_error, flash_success, render_flash_messages
 
 
 def color_swatch_data_uri(color: str | None) -> str:
@@ -26,18 +27,20 @@ init_db()
 
 st.title("Residents")
 st.caption("Maintain the active resident roster used by the scheduler.")
+render_flash_messages()
 
 existing = get_residents(active_only=False)
 
 if existing.empty:
 	existing = pd.DataFrame(
 		[
-			{"name": "", "email": "", "max_shifts": 6, "min_shifts": None, "weight": 1.0, "color": "", "active": 1}
+			{"name": "", "email": "", "max_shifts": 6, "min_shifts": None, "weight": 1, "color": "", "active": 1}
 		]
 	)
 else:
 	existing = existing[["id", "name", "email", "max_shifts", "min_shifts", "weight", "color", "active"]]
 
+existing["weight"] = pd.to_numeric(existing["weight"], errors="coerce").fillna(1).round().clip(lower=1, upper=5).astype(int)
 existing["color_preview"] = existing["color"].apply(color_swatch_data_uri)
 column_order = ["id", "name", "email", "max_shifts", "min_shifts", "weight", "color_preview", "color", "active"]
 
@@ -51,7 +54,7 @@ edited = st.data_editor(
 		"email": st.column_config.TextColumn("Email"),
 		"max_shifts": st.column_config.NumberColumn("Max shifts", min_value=0, step=1),
 		"min_shifts": st.column_config.NumberColumn("Min shifts", min_value=0, step=1),
-		"weight": st.column_config.NumberColumn("Weight", min_value=0.1, step=0.1),
+		"weight": st.column_config.SelectboxColumn("PGY level", options=[1, 2, 3, 4, 5], required=True),
 		"color_preview": st.column_config.ImageColumn("Swatch", width="small"),
 		"color": st.column_config.SelectboxColumn("Color", options=RESIDENT_COLOR_PALETTE),
 		"active": st.column_config.CheckboxColumn("Active"),
@@ -62,9 +65,9 @@ if st.button("Save residents", type="primary"):
 	try:
 		save_residents(edited)
 	except ValueError as exc:
-		st.error(str(exc))
+		flash_error(str(exc))
 	else:
-		st.success("Residents saved.")
-		st.rerun()
+		flash_success("Residents saved.")
+	st.rerun()
 
 st.info("Removing a resident row marks that resident inactive instead of deleting historical schedule data.")

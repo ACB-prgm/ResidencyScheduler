@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from io import BytesIO
 from datetime import datetime, time, timedelta, timezone
+from zipfile import ZIP_DEFLATED, ZipFile
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -34,7 +36,7 @@ def build_fullcalendar_events(assignments: pd.DataFrame) -> list[dict]:
 	return events
 
 
-def build_ical_calendar(assignments: pd.DataFrame, time_zone: str = DEFAULT_TIME_ZONE) -> bytes:
+def build_ical_calendar(assignments: pd.DataFrame, time_zone: str = DEFAULT_TIME_ZONE, calendar_name: str | None = None) -> bytes:
 	tz = ZoneInfo(time_zone)
 	now = datetime.now(timezone.utc).replace(microsecond=0)
 	lines = [
@@ -44,6 +46,8 @@ def build_ical_calendar(assignments: pd.DataFrame, time_zone: str = DEFAULT_TIME
 		"CALSCALE:GREGORIAN",
 		"METHOD:PUBLISH",
 	]
+	if calendar_name:
+		lines.append(f"X-WR-CALNAME:{_escape_text(calendar_name)}")
 
 	for assignment in assignments.sort_values(["work_date", "resident_name"]).itertuples():
 		work_date = pd.to_datetime(assignment.work_date).date()
@@ -71,6 +75,20 @@ def build_ical_calendar(assignments: pd.DataFrame, time_zone: str = DEFAULT_TIME
 
 	lines.append("END:VCALENDAR")
 	return "\r\n".join(_fold_line(line) for line in lines).encode("utf-8") + b"\r\n"
+
+
+def build_pgy_ical_zip(assignments: pd.DataFrame, year: int, month: int, time_zone: str = DEFAULT_TIME_ZONE) -> bytes:
+	buffer = BytesIO()
+	with ZipFile(buffer, "w", compression=ZIP_DEFLATED) as archive:
+		pgy_levels = [] if assignments.empty else sorted(assignments["resident_pgy"].dropna().astype(int).unique().tolist())
+		for pgy_level in pgy_levels:
+			group = assignments[assignments["resident_pgy"].astype(int) == pgy_level]
+			calendar_name = f"{int(year)}-{int(month):02d}-PGY{pgy_level}"
+			archive.writestr(
+				f"{calendar_name}.ics",
+				build_ical_calendar(group, time_zone=time_zone, calendar_name=calendar_name),
+			)
+	return buffer.getvalue()
 
 
 def _format_utc(value: datetime) -> str:

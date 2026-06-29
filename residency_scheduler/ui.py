@@ -19,6 +19,7 @@ MONTH_QUERY_PARAM = "month"
 DRAFT_QUERY_PARAM = "draft_id"
 APP_STATE_MONTH_KEY = "active_year_month"
 APP_STATE_DRAFT_KEY = "active_schedule_draft_id"
+FLASH_KEY = "flash_messages"
 
 
 def select_month(location: str = "global") -> tuple[int, int]:
@@ -119,6 +120,45 @@ def select_period(location: str = "main") -> int:
 	if period_id is None:
 		st.stop()
 	return period_id
+
+
+def flash(level: str, message: str) -> None:
+	messages = list(st.session_state.get(FLASH_KEY, []))
+	messages.append({"level": level, "message": message})
+	st.session_state[FLASH_KEY] = messages
+
+
+def flash_success(message: str) -> None:
+	flash("success", message)
+
+
+def flash_error(message: str) -> None:
+	flash("error", message)
+
+
+def flash_warning(message: str) -> None:
+	flash("warning", message)
+
+
+def render_flash_messages() -> None:
+	messages = list(st.session_state.pop(FLASH_KEY, []))
+	for item in messages:
+		level = str(item.get("level", "info"))
+		message = str(item.get("message", ""))
+		if level == "success":
+			st.success(message)
+		elif level == "error":
+			st.error(message)
+		elif level == "warning":
+			st.warning(message)
+		else:
+			st.info(message)
+
+
+def clear_active_draft() -> None:
+	st.session_state.pop(ACTIVE_DRAFT_KEY, None)
+	set_app_state(APP_STATE_DRAFT_KEY, None)
+	st.query_params.pop(DRAFT_QUERY_PARAM, None)
 
 
 def _query_param(key: str) -> str | None:

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import calendar
+import random
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 from ortools.sat.python import cp_model
@@ -11,6 +12,7 @@ from residency_scheduler.repository import (
 	HARD_UNAVAILABLE_TYPES,
 	get_expanded_schedule_requests,
 	get_period,
+	get_prior_assignment_history,
 	get_residents,
 	get_schedule_rules,
 	record_solver_run,
@@ -20,6 +22,9 @@ from residency_scheduler.repository import (
 FAIR_DISTRIBUTION_PENALTY = 5000
 TOTAL_SURPLUS_WEIGHT_PENALTY = 50
 WEEKEND_SURPLUS_WEIGHT_PENALTY = 150
+ROLLING_TOTAL_SURPLUS_PENALTY = 800
+ROLLING_WEEKEND_SURPLUS_PENALTY = 1200
+RANDOM_TIE_BREAK_MAX = 100
 
 
 @dataclass(frozen=True)
@@ -30,11 +35,12 @@ class SolverResult:
 	warnings: list[str]
 
 
-def solve_period(period_id: int, max_time_seconds: int = 30) -> SolverResult:
+def solve_period(period_id: int, max_time_seconds: int = 30, random_seed: int | None = None) -> SolverResult:
 	period = get_period(period_id)
 	residents = get_residents(active_only=True)
 	requests = get_expanded_schedule_requests(period_id)
 	rules = get_schedule_rules(period_id)
+	prior_history = get_prior_assignment_history(period_id, months=3)
 	dates = _month_dates(period["year"], period["month"])
 	required_count = int(period["required_count"])
 
@@ -87,7 +93,7 @@ def solve_period(period_id: int, max_time_seconds: int = 30) -> SolverResult:
 		resident_id: sum(works[(resident_id, work_date)] for work_date in date_keys)
 		for resident_id in resident_ids
 	}
-	_add_distribution_objective(
+	total_surplus = _add_distribution_objective(
 		model=model,
 		objective_terms=objective_terms,
 		residents=residents,
@@ -104,7 +110,7 @@ def solve_period(period_id: int, max_time_seconds: int = 30) -> SolverResult:
 			resident_id: sum(works[(resident_id, work_date)] for work_date in weekend_dates)
 			for resident_id in resident_ids
 		}
-		_add_distribution_objective(
+		weekend_surplus = _add_distribution_objective(
 			model=model,
 			objective_terms=objective_terms,
 			residents=residents,
@@ -114,6 +120,16 @@ def solve_period(period_id: int, max_time_seconds: int = 30) -> SolverResult:
 			prefix="weekend",
 			surplus_weight_penalty=WEEKEND_SURPLUS_WEIGHT_PENALTY,
 		)
+	else:
+		weekend_surplus = {}
+
+	_add_rolling_surplus_objective(
+		objective_terms=objective_terms,
+		resident_ids=resident_ids,
+		prior_history=prior_history,
+		total_surplus=total_surplus,
+		weekend_surplus=weekend_surplus,
+	)
 
 	for row in requests.itertuples():
 		request_type = str(row.request_type).lower()
@@ -135,19 +151,57 @@ def solve_period(period_id: int, max_time_seconds: int = 30) -> SolverResult:
 			objective_terms.append(back_to_back * 40)
 
 	for row in rules.itertuples():
-		if str(row.rule_type).lower() != "weekday_count":
-			continue
-		rule_dates = [d.isoformat() for d in dates if d.weekday() == int(row.weekday)]
-		total = sum(works[(int(row.resident_id), work_date)] for work_date in rule_dates)
+		rule_type = str(row.rule_type).lower()
+		resident_id = int(row.resident_id)
 		target_count = int(row.target_count)
-		if str(row.priority).lower() == "hard":
-			model.Add(total == target_count)
-		else:
-			deviation = model.NewIntVar(0, len(rule_dates), f"rule_deviation_{row.id}")
-			model.AddAbsEquality(deviation, total - target_count)
-			objective_terms.append(deviation * 60)
+		priority = str(row.priority).lower()
 
-	model.Minimize(sum(objective_terms))
+		if rule_type == "weekday_count":
+			rule_dates = [d.isoformat() for d in dates if d.weekday() == int(row.weekday)]
+			total = sum(works[(resident_id, work_date)] for work_date in rule_dates)
+			if priority == "hard":
+				model.Add(total == target_count)
+			else:
+				deviation = model.NewIntVar(0, len(rule_dates), f"rule_deviation_{row.id}")
+				model.AddAbsEquality(deviation, total - target_count)
+				objective_terms.append(deviation * 60)
+		elif rule_type == "weekday_pair_count":
+			pair_dates = _paired_date_keys(dates, int(row.weekday), int(row.paired_weekday))
+			pair_vars = []
+			for first, second in pair_dates:
+				pair_var = model.NewBoolVar(f"rule_pair_{row.id}_{first}_{second}")
+				model.AddBoolAnd([works[(resident_id, first)], works[(resident_id, second)]]).OnlyEnforceIf(pair_var)
+				model.AddBoolOr([works[(resident_id, first)].Not(), works[(resident_id, second)].Not()]).OnlyEnforceIf(pair_var.Not())
+				pair_vars.append(pair_var)
+
+			weekday_dates = [d.isoformat() for d in dates if d.weekday() == int(row.weekday)]
+			paired_weekday_dates = [d.isoformat() for d in dates if d.weekday() == int(row.paired_weekday)]
+			pair_total = sum(pair_vars)
+			weekday_total = sum(works[(resident_id, work_date)] for work_date in weekday_dates)
+			paired_weekday_total = sum(works[(resident_id, work_date)] for work_date in paired_weekday_dates)
+			if priority == "hard":
+				model.Add(pair_total == target_count)
+				model.Add(weekday_total == target_count)
+				model.Add(paired_weekday_total == target_count)
+			else:
+				for suffix, total, max_count in [
+					("pair", pair_total, len(pair_dates)),
+					("weekday", weekday_total, len(weekday_dates)),
+					("paired_weekday", paired_weekday_total, len(paired_weekday_dates)),
+				]:
+					deviation = model.NewIntVar(0, max_count, f"rule_{suffix}_deviation_{row.id}")
+					model.AddAbsEquality(deviation, total - target_count)
+					objective_terms.append(deviation * 60)
+
+	random_terms = _random_tie_break_terms(
+		works=works,
+		resident_ids=resident_ids,
+		date_keys=date_keys,
+		total_required=total_required_shifts,
+		random_seed=random_seed,
+	)
+	random_upper_bound = total_required_shifts * RANDOM_TIE_BREAK_MAX
+	model.Minimize(sum(objective_terms) * (random_upper_bound + 1) + sum(random_terms))
 
 	solver = cp_model.CpSolver()
 	solver.parameters.max_time_in_seconds = max_time_seconds
@@ -186,6 +240,16 @@ def _month_dates(year: int, month: int) -> list[date]:
 	return [date(int(year), int(month), day) for day in range(1, last_day + 1)]
 
 
+def _paired_date_keys(dates: list[date], weekday: int, paired_weekday: int) -> list[tuple[str, str]]:
+	date_set = set(dates)
+	pairs = []
+	for first in dates:
+		second = first + timedelta(days=1)
+		if first.weekday() == weekday and second in date_set and second.weekday() == paired_weekday:
+			pairs.append((first.isoformat(), second.isoformat()))
+	return pairs
+
+
 def _add_distribution_objective(
 	model: cp_model.CpModel,
 	objective_terms: list,
@@ -195,10 +259,11 @@ def _add_distribution_objective(
 	max_count: int,
 	prefix: str,
 	surplus_weight_penalty: int,
-) -> None:
+) -> dict[int, cp_model.IntVar]:
 	resident_count = len(counts_by_resident)
 	base = total_required // resident_count
 	ceiling = base + (1 if total_required % resident_count else 0)
+	surplus_by_resident = {}
 
 	for row in residents.itertuples():
 		resident_id = int(row.id)
@@ -210,10 +275,75 @@ def _add_distribution_objective(
 		model.Add(under_base >= base - count)
 		model.Add(over_ceiling >= count - ceiling)
 		model.Add(surplus >= count - base)
+		surplus_by_resident[resident_id] = surplus
 
 		objective_terms.append(under_base * FAIR_DISTRIBUTION_PENALTY)
 		objective_terms.append(over_ceiling * FAIR_DISTRIBUTION_PENALTY)
 		objective_terms.append(surplus * _weight_penalty(row.weight, surplus_weight_penalty))
+	return surplus_by_resident
+
+
+def _add_rolling_surplus_objective(
+	objective_terms: list,
+	resident_ids: list[int],
+	prior_history: pd.DataFrame,
+	total_surplus: dict[int, cp_model.IntVar],
+	weekend_surplus: dict[int, cp_model.IntVar],
+) -> None:
+	if prior_history.empty:
+		return
+
+	prior_total_surplus = _historical_surplus_counts(prior_history, resident_ids, weekend_only=False)
+	prior_weekend_surplus = _historical_surplus_counts(prior_history, resident_ids, weekend_only=True)
+
+	for resident_id in resident_ids:
+		total_penalty = prior_total_surplus.get(resident_id, 0) * ROLLING_TOTAL_SURPLUS_PENALTY
+		if total_penalty and resident_id in total_surplus:
+			objective_terms.append(total_surplus[resident_id] * total_penalty)
+
+		weekend_penalty = prior_weekend_surplus.get(resident_id, 0) * ROLLING_WEEKEND_SURPLUS_PENALTY
+		if weekend_penalty and resident_id in weekend_surplus:
+			objective_terms.append(weekend_surplus[resident_id] * weekend_penalty)
+
+
+def _historical_surplus_counts(prior_history: pd.DataFrame, resident_ids: list[int], weekend_only: bool) -> dict[int, int]:
+	surplus_counts = {resident_id: 0 for resident_id in resident_ids}
+	resident_count = len(resident_ids)
+	if resident_count == 0:
+		return surplus_counts
+
+	history = prior_history.copy()
+	if weekend_only:
+		history = history[history["is_weekend"].astype(int) == 1]
+	if history.empty:
+		return surplus_counts
+
+	for _, month_assignments in history.groupby(["year", "month", "period_id"]):
+		total_required = len(month_assignments)
+		if total_required == 0:
+			continue
+		base = total_required // resident_count
+		counts = month_assignments["resident_id"].astype(int).value_counts().to_dict()
+		for resident_id in resident_ids:
+			surplus_counts[resident_id] += max(0, counts.get(resident_id, 0) - base)
+	return surplus_counts
+
+
+def _random_tie_break_terms(
+	works: dict[tuple[int, str], cp_model.IntVar],
+	resident_ids: list[int],
+	date_keys: list[str],
+	total_required: int,
+	random_seed: int | None,
+) -> list:
+	if total_required <= 0:
+		return []
+	rng = random.Random(random_seed) if random_seed is not None else random.SystemRandom()
+	return [
+		works[(resident_id, work_date)] * rng.randint(1, RANDOM_TIE_BREAK_MAX)
+		for resident_id in resident_ids
+		for work_date in date_keys
+	]
 
 
 def _weight_penalty(weight, multiplier: int) -> int:
@@ -260,8 +390,26 @@ def _validate_inputs(
 	for row in rules.itertuples():
 		if int(row.resident_id) not in valid_residents:
 			errors.append(f"Rule references inactive/missing resident_id {row.resident_id}.")
+		rule_type = str(row.rule_type).lower()
+		if rule_type not in {"weekday_count", "weekday_pair_count"}:
+			errors.append("Only weekday_count and weekday_pair_count rules are supported.")
 		if str(row.comparator).lower() != "exactly":
-			errors.append("Only exactly weekday count rules are supported.")
+			errors.append("Only exactly rules are supported.")
+		target_count = int(row.target_count)
+		if rule_type == "weekday_pair_count":
+			if pd.isna(row.paired_weekday):
+				errors.append("Paired weekday is required for weekday_pair_count rules.")
+				continue
+			weekday = int(row.weekday)
+			paired_weekday = int(row.paired_weekday)
+			if paired_weekday != (weekday + 1) % 7:
+				errors.append("Paired weekday rules must use adjacent weekdays.")
+				continue
+			available_pairs = len(_paired_date_keys(dates, weekday, paired_weekday))
+			if target_count > available_pairs:
+				errors.append(
+					f"Rule target count {target_count} exceeds {available_pairs} available adjacent weekday pair(s)."
+				)
 
 	hard_assignments = requests[
 		(requests["priority"].str.lower() == "hard")

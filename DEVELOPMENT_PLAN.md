@@ -68,17 +68,19 @@ Hard constraints implemented:
 - Hard assign requests are honored.
 - Hard assign requests cannot exceed required coverage for a date.
 - Residents cannot exceed configured max monthly shifts.
-- Hard weekday-count rules are enforced exactly.
+- Hard weekday-count and adjacent-pair rules are enforced exactly.
 
 Soft constraints implemented:
 
 - Fairly distribute total shifts using floor/ceiling targets.
 - Fairly distribute Sat/Sun weekend shifts using floor/ceiling targets.
-- Protect higher-weight residents from surplus total and weekend shifts where feasible.
+- Avoid repeating surplus total and Sat/Sun weekend shifts from the previous 3 calendar months where feasible.
+- Protect higher PGY levels from surplus total and weekend shifts where feasible.
+- Randomize equal-cost leftover assignments on each solver run.
 - Penalize prefer-off violations.
 - Reward prefer-work matches.
 - Avoid back-to-back night shifts where possible.
-- Penalize soft weekday-count rule deviation.
+- Penalize soft weekday-count and adjacent-pair rule deviation.
 
 ### Review, Manual Adjustment, and Export
 
@@ -89,7 +91,7 @@ Status: complete.
 - Unlocked assignments can be manually reassigned.
 - Manual edits validate hard constraints before saving.
 - Manual edits can optionally create hard assign requests.
-- Generate page exports assignments as an ICS file for manual calendar import.
+- Generate page exports assignments as a PGY-grouped ICS ZIP for manual calendar import.
 
 ### Calendar Publishing
 
@@ -113,7 +115,7 @@ Implemented tests cover:
 - Max-shift infeasibility.
 - Preference-heavy feasible schedules.
 - Back-to-back avoidance.
-- Exactly-two-Fridays weekday-count rule.
+- Weekday-count and Friday+Saturday adjacent-pair rules.
 - Manual reassignment with assign request creation.
 - Calendar summary output.
 - Streamlit page smoke loading.
