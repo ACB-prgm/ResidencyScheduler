@@ -4,7 +4,7 @@
 
 Use the Year-Month selector at the top of any page to choose the month you are editing. The selected month is global, so changing it on one page updates the active month everywhere.
 
-Each year-month has one schedule. Requests, special rules, generated assignments, manual edits, and calendar publishing settings all belong to the selected month.
+Each year-month has one schedule. Requests, scheduling rules, generated assignments, manual edits, and calendar publishing settings all belong to the selected month.
 
 ## Residents
 
@@ -27,9 +27,9 @@ Availability and Preferences are date-based requests. A request can cover one da
 
 Vacation ranges automatically add a soft `prefer_work` request for the Thursday before vacation starts when that Thursday is inside the selected month.
 
-## Special Rules
+## Scheduling Rules
 
-Special Rules are month-specific scheduling rules. New special rules default to hard priority. Change a rule to soft only when it is acceptable for the solver to miss the target.
+Scheduling Rules are month-specific constraints. New scheduling rules default to hard priority. Change a rule to soft only when it is acceptable for the solver to miss the target.
 
 ### Weekday Count
 
@@ -83,3 +83,5 @@ Manual reassignments and swaps validate hard unavailable conflicts before saving
 ICS export downloads a single calendar file named for the selected year-month call schedule.
 
 Google Calendar publishing writes the current month to a selected writable Google Calendar. Publishing deletes prior Residency Scheduler events for the selected month and calendar before inserting the current assignments. The app identifies its own events using private Google Calendar metadata, so it does not wipe unrelated calendar events.
+
+The selected Google Calendar is remembered as your default for future months. Use Wipe Scheduler Events when you need to remove the app-generated events for the selected year-month without publishing a replacement schedule.

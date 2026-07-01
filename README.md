@@ -20,7 +20,7 @@ The app uses:
 - Vacation, unavailable, approved absence, medical leave, and assign requests default to hard priority
 - Prefer off and prefer work requests default to soft priority
 - Vacation ranges automatically add a soft prefer-work request for the Thursday before vacation starts when that date is in the same month
-- Generic special rules support weekday counts and adjacent weekday pairs such as Friday+Saturday for a resident
+- Generic scheduling rules support weekday counts and adjacent weekday pairs such as Friday+Saturday for a resident
 - Workload, weekend shifts, preferences, back-to-back shifts, and rolling surplus fairness are optimized where possible
 
 ## Local Setup

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import calendar
 import json
+import re
 from datetime import date, timedelta
 from typing import Iterable
 
@@ -63,6 +64,22 @@ def set_app_state(key: str, value: str | None) -> None:
 			""",
 			(key, value),
 		)
+
+
+def google_calendar_default_state_key(google_sub: str) -> str:
+	return f"google_calendar_default:{google_sub}"
+
+
+def get_user_default_google_calendar_id(google_sub: str | None) -> str | None:
+	if not google_sub:
+		return None
+	return get_app_state(google_calendar_default_state_key(str(google_sub)))
+
+
+def set_user_default_google_calendar_id(google_sub: str | None, calendar_id: str | None) -> None:
+	if not google_sub:
+		return
+	set_app_state(google_calendar_default_state_key(str(google_sub)), calendar_id)
 
 
 def seed_months(start_year: int | None = None, years: int = 10) -> None:
@@ -167,7 +184,7 @@ def get_residents(active_only: bool = False) -> pd.DataFrame:
 
 
 def resident_label(row) -> str:
-	return f"{row.name} · resident #{int(row.id)}"
+	return str(row.name)
 
 
 def get_resident_options(active_only: bool = True) -> dict[str, int]:
@@ -193,7 +210,10 @@ def save_residents(df: pd.DataFrame) -> None:
 	clean["weight"] = pd.to_numeric(clean["weight"], errors="coerce").fillna(1.0).round().clip(lower=1, upper=5).astype(int)
 	clean["color"] = clean["color"].fillna("").astype(str).str.strip().str.upper()
 	clean["active"] = clean["active"].fillna(1).astype(int)
+	_validate_resident_names(clean)
+	_validate_resident_shift_bounds(clean)
 	_validate_resident_colors(clean)
+	_restore_missing_resident_ids_by_name(clean)
 
 	with get_connection() as conn:
 		existing_ids = {int(row[0]) for row in conn.execute("SELECT id FROM residents").fetchall()}
@@ -282,7 +302,7 @@ def get_schedule_requests_for_editor(period_id: int) -> pd.DataFrame:
 	if requests.empty:
 		return pd.DataFrame(columns=columns)
 
-	requests["resident"] = requests["resident_name"] + " · resident #" + requests["resident_id"].astype(str)
+	requests["resident"] = requests["resident_name"]
 	requests["start_date"] = pd.to_datetime(requests["start_date"]).dt.date
 	requests["end_date"] = pd.to_datetime(requests["end_date"]).dt.date
 	return requests[columns]
@@ -298,6 +318,7 @@ def replace_schedule_requests(period_id: int, df: pd.DataFrame) -> None:
 
 	resident_options = get_resident_options(active_only=True)
 	rows = []
+	expanded_rows = []
 	valid_dates = set(period_dates(period_id))
 	for row in clean.itertuples(index=False):
 		resident_id = _resolve_resident_id(row, resident_options)
@@ -315,7 +336,16 @@ def replace_schedule_requests(period_id: int, df: pd.DataFrame) -> None:
 		for work_date in _date_range(start, end):
 			if work_date.isoformat() not in valid_dates:
 				raise ValueError(f"Request date {work_date.isoformat()} is outside the selected month.")
+			expanded_rows.append(
+				{
+					"resident_id": resident_id,
+					"work_date": work_date.isoformat(),
+					"request_type": request_type,
+					"priority": priority,
+				}
+			)
 		rows.append((period_id, resident_id, start.isoformat(), end.isoformat(), request_type, priority, row.reason or ""))
+	_validate_schedule_request_conflicts(expanded_rows)
 
 	with get_connection() as conn:
 		conn.execute("DELETE FROM schedule_requests WHERE period_id = ?", (period_id,))
@@ -387,7 +417,7 @@ def get_schedule_rules_for_editor(period_id: int) -> pd.DataFrame:
 	if rules.empty:
 		return pd.DataFrame(columns=columns)
 
-	rules["resident"] = rules["resident_name"] + " · resident #" + rules["resident_id"].astype(str)
+	rules["resident"] = rules["resident_name"]
 	rules["weekday"] = rules["weekday"].map(WEEKDAY_NAMES)
 	rules["paired_weekday"] = rules["paired_weekday"].map(WEEKDAY_NAMES)
 	return rules[columns]
@@ -586,6 +616,59 @@ def _validate_resident_colors(df: pd.DataFrame) -> None:
 	duplicates = sorted({color for color in provided if provided.count(color) > 1})
 	if duplicates:
 		raise ValueError(f"Resident colors must be unique: {', '.join(duplicates)}.")
+
+
+def _validate_resident_names(df: pd.DataFrame) -> None:
+	names = [str(name).strip() for name in df["name"].tolist() if str(name).strip()]
+	if len(names) != len(df):
+		raise ValueError("Resident name is required.")
+	normalized = [name.lower() for name in names]
+	duplicates = sorted({names[index] for index, value in enumerate(normalized) if normalized.count(value) > 1})
+	if duplicates:
+		raise ValueError(f"Resident names must be unique: {', '.join(duplicates)}.")
+
+
+def _validate_resident_shift_bounds(df: pd.DataFrame) -> None:
+	for row in df.itertuples(index=False):
+		if pd.notna(row.min_shifts) and pd.notna(row.max_shifts) and int(row.min_shifts) > int(row.max_shifts):
+			raise ValueError(f"Minimum shifts cannot exceed maximum shifts for {row.name}.")
+
+
+def _restore_missing_resident_ids_by_name(df: pd.DataFrame) -> None:
+	missing_id = df["id"].isna()
+	if not missing_id.any():
+		return
+	with get_connection() as conn:
+		existing_by_name = {
+			str(row["name"]).strip().lower(): int(row["id"])
+			for row in conn.execute("SELECT id, name FROM residents").fetchall()
+		}
+	for index, row in df[missing_id].iterrows():
+		resident_id = existing_by_name.get(str(row["name"]).strip().lower())
+		if resident_id is not None:
+			df.at[index, "id"] = resident_id
+
+
+def _validate_schedule_request_conflicts(expanded_rows: list[dict]) -> None:
+	if not expanded_rows:
+		return
+	requests = pd.DataFrame(expanded_rows)
+	hard_assignments = requests[
+		(requests["priority"].str.lower() == "hard")
+		& (requests["request_type"].str.lower() == "assign")
+	]
+	hard_unavailable = requests[
+		(requests["priority"].str.lower() == "hard")
+		& (requests["request_type"].str.lower().isin(HARD_UNAVAILABLE_TYPES))
+	]
+	if hard_assignments.empty or hard_unavailable.empty:
+		return
+	conflicts = hard_assignments.merge(hard_unavailable, on=["resident_id", "work_date"], suffixes=("_assign", "_unavailable"))
+	if not conflicts.empty:
+		row = conflicts.iloc[0]
+		raise ValueError(
+			f"Conflicting hard requests: resident is assigned and unavailable on {row['work_date']}."
+		)
 
 
 def _next_resident_color(used_colors: set[str], resident_id: int) -> str:
@@ -871,6 +954,12 @@ def _ensure_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
 def _resolve_resident_id(row, resident_options: dict[str, int]) -> int:
 	if getattr(row, "resident", None) in resident_options:
 		return resident_options[row.resident]
+	resident_label_value = str(getattr(row, "resident", "") or "")
+	match = re.search(r"resident #(\d+)", resident_label_value)
+	if match:
+		resident_id = int(match.group(1))
+		if resident_id in set(resident_options.values()):
+			return resident_id
 	if pd.notna(getattr(row, "resident_id", None)):
 		resident_id = int(row.resident_id)
 		if resident_id in set(resident_options.values()):

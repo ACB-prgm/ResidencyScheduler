@@ -11,7 +11,7 @@ Streamlit UI
 	Home page for year-month and named draft creation
 	Resident roster page
 	Availability and Preferences page
-	Special Rules page
+	Scheduling Rules page
 	Generate page with FullCalendar review, manual edits, and ICS export
 
 SQLite
@@ -19,7 +19,7 @@ SQLite
 	Residents
 	Named schedule drafts
 	Schedule requests
-	Special rules
+	Scheduling rules
 	Generated assignments
 	Solver run audit records
 

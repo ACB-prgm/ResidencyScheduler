@@ -5,7 +5,13 @@ import pytest
 
 from residency_scheduler.calendar import google
 from residency_scheduler.db import init_db
-from residency_scheduler.repository import get_assignments, get_or_create_schedule_period, save_assignments, save_residents
+from residency_scheduler.repository import (
+	get_assignments,
+	get_or_create_schedule_period,
+	save_assignments,
+	save_residents,
+	update_assignment_google_event_id,
+)
 
 
 def auth_session() -> dict:
@@ -99,8 +105,6 @@ def test_publish_period_wipes_existing_events_and_stores_new_event_ids(isolated_
 	)
 	assignments = get_assignments(period_id)
 	for row in assignments.itertuples():
-		from residency_scheduler.repository import update_assignment_google_event_id
-
 		update_assignment_google_event_id(int(row.id), f"old-{row.id}")
 
 	service = FakeCalendarService(event_pages=[{"items": [{"id": "old-event"}]}])
@@ -113,6 +117,33 @@ def test_publish_period_wipes_existing_events_and_stores_new_event_ids(isolated_
 	assert service.deleted == [("calendar@example.org", "old-event")]
 	assert updated["google_event_id"].tolist() == ["created-1", "created-2"]
 	assert len(service.inserted) == 2
+	assert service.event_list_calls[0]["privateExtendedProperty"] == [
+		"rs_app=residency_scheduler",
+		f"rs_period_id={period_id}",
+		"rs_year_month=2026-08",
+	]
+
+
+def test_wipe_period_deletes_only_scheduler_events_and_clears_event_ids(isolated_google_db):
+	period_id = get_or_create_schedule_period(2026, 8, required_count=1)
+	save_assignments(
+		period_id,
+		[
+			{"work_date": "2026-08-01", "resident_id": 1},
+			{"work_date": "2026-08-02", "resident_id": 2},
+		],
+	)
+	for row in get_assignments(period_id).itertuples():
+		update_assignment_google_event_id(int(row.id), f"old-{row.id}")
+	service = FakeCalendarService(event_pages=[{"items": [{"id": "old-1"}, {"id": "old-2"}]}])
+
+	result = google.wipe_period_from_calendar(period_id, "calendar@example.org", auth_session(), service=service)
+
+	updated = get_assignments(period_id).sort_values("work_date")
+	assert result.deleted_count == 2
+	assert result.inserted_count == 0
+	assert service.deleted == [("calendar@example.org", "old-1"), ("calendar@example.org", "old-2")]
+	assert updated["google_event_id"].fillna("").tolist() == ["", ""]
 	assert service.event_list_calls[0]["privateExtendedProperty"] == [
 		"rs_app=residency_scheduler",
 		f"rs_period_id={period_id}",
@@ -148,6 +179,31 @@ def test_publish_period_batches_deletes_and_inserts_when_available(isolated_goog
 	assert service.batch_execute_count == 2
 	assert service.deleted == [("calendar@example.org", "old-1"), ("calendar@example.org", "old-2")]
 	assert updated["google_event_id"].tolist() == ["batch-created-1", "batch-created-2"]
+
+
+def test_publish_period_uses_provided_existing_event_ids_without_listing(isolated_google_db):
+	period_id = get_or_create_schedule_period(2026, 8, required_count=1)
+	save_assignments(
+		period_id,
+		[
+			{"work_date": "2026-08-01", "resident_id": 1},
+			{"work_date": "2026-08-02", "resident_id": 2},
+		],
+	)
+	service = FakeCalendarService()
+
+	result = google.publish_period_to_calendar(
+		period_id,
+		"calendar@example.org",
+		auth_session(),
+		service=service,
+		existing_event_ids=["old-1", "old-2"],
+	)
+
+	assert result.deleted_count == 2
+	assert result.inserted_count == 2
+	assert service.event_list_calls == []
+	assert service.deleted == [("calendar@example.org", "old-1"), ("calendar@example.org", "old-2")]
 
 
 class FakeCalendarService:

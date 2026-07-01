@@ -51,7 +51,7 @@ def authenticated_session() -> dict:
 		"app.py",
 		"pages/1_Residents.py",
 		"pages/2_Availability_and_Preferences.py",
-		"pages/3_Special_Rules.py",
+		"pages/3_Scheduling_Rules.py",
 		"pages/4_Generate_Schedule.py",
 	],
 )
@@ -91,8 +91,8 @@ def test_home_defaults_to_current_year_month(isolated_db):
 	assert app.selectbox[0].value.startswith(f"{date.today().year}-{date.today().month:02d}")
 
 
-def test_special_rules_page_renders_rule_builder(isolated_db):
-	app = AppTest.from_file(str(ROOT / "pages/3_Special_Rules.py"))
+def test_scheduling_rules_page_renders_rule_builder(isolated_db):
+	app = AppTest.from_file(str(ROOT / "pages/3_Scheduling_Rules.py"))
 	app.session_state[AUTH_SESSION_KEY] = authenticated_session()
 	app.run(timeout=5)
 
@@ -104,4 +104,4 @@ def test_special_rules_page_renders_rule_builder(isolated_db):
 	assert "Resident" in selectbox_labels
 	assert "Priority" in selectbox_labels
 	assert "Target count" in number_labels
-	assert "Save special rules" not in button_labels
+	assert "Save scheduling rules" not in button_labels

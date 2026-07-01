@@ -12,7 +12,9 @@ from residency_scheduler.repository import (
 	get_assignments,
 	get_period,
 	get_prior_assignment_history,
+	get_resident_options,
 	get_residents,
+	get_user_default_google_calendar_id,
 	get_schedule_rules,
 	get_schedule_periods,
 	get_schedule_requests_for_editor,
@@ -21,6 +23,7 @@ from residency_scheduler.repository import (
 	replace_schedule_rules,
 	save_assignments,
 	save_residents,
+	set_user_default_google_calendar_id,
 	seed_months,
 	swap_assignment_residents,
 	update_assignment_resident,
@@ -71,6 +74,15 @@ def test_month_settings_update_selected_period(isolated_db):
 	assert int(period["required_count"]) == 2
 	assert period["google_calendar_id"] == "calendar@example.com"
 	assert not get_assignments(period_id).empty
+
+
+def test_user_default_google_calendar_is_scoped_by_google_subject(isolated_db):
+	set_user_default_google_calendar_id("sub-one", "calendar-one@example.com")
+	set_user_default_google_calendar_id("sub-two", "calendar-two@example.com")
+
+	assert get_user_default_google_calendar_id("sub-one") == "calendar-one@example.com"
+	assert get_user_default_google_calendar_id("sub-two") == "calendar-two@example.com"
+	assert get_user_default_google_calendar_id("missing-sub") is None
 
 
 def test_empty_request_editor_has_no_placeholder_rows(isolated_db):
@@ -161,6 +173,28 @@ def test_resident_edits_preserve_existing_ids(isolated_db):
 	assert updated.loc[updated["id"] == ada_id, "email"].iloc[0] == "ada.new@example.com"
 
 
+def test_resident_save_restores_hidden_ids_by_name(isolated_db):
+	save_residents(
+		pd.DataFrame(
+			[
+				{"name": "Ada", "email": "ada@example.com", "max_shifts": 10, "min_shifts": None, "weight": 1.0, "active": 1},
+				{"name": "Ben", "email": "ben@example.com", "max_shifts": 10, "min_shifts": None, "weight": 1.0, "active": 1},
+			]
+		)
+	)
+	original = get_residents(active_only=False)
+	ada_id = int(original.loc[original["name"] == "Ada", "id"].iloc[0])
+
+	edited_without_ids = original.drop(columns=["id"]).copy()
+	edited_without_ids.loc[edited_without_ids["name"] == "Ada", "email"] = "ada.hidden@example.com"
+	save_residents(edited_without_ids)
+
+	updated = get_residents(active_only=False)
+	assert len(updated) == 2
+	assert int(updated.loc[updated["name"] == "Ada", "id"].iloc[0]) == ada_id
+	assert updated.loc[updated["id"] == ada_id, "email"].iloc[0] == "ada.hidden@example.com"
+
+
 def test_resident_colors_are_auto_assigned_and_unique(isolated_db):
 	save_residents(
 		pd.DataFrame(
@@ -192,6 +226,45 @@ def test_resident_pgy_levels_are_normalized_to_one_through_five(isolated_db):
 	residents = get_residents(active_only=False).sort_values("name")
 
 	assert residents["weight"].astype(int).tolist() == [1, 5, 3]
+
+
+def test_resident_options_use_names_without_internal_ids(isolated_db):
+	save_residents(
+		pd.DataFrame(
+			[
+				{"name": "Ada", "email": "ada@example.com", "max_shifts": 10, "min_shifts": None, "weight": 1.0, "active": 1},
+				{"name": "Ben", "email": "ben@example.com", "max_shifts": 10, "min_shifts": None, "weight": 1.0, "active": 1},
+			]
+		)
+	)
+
+	options = get_resident_options(active_only=True)
+
+	assert set(options) == {"Ada", "Ben"}
+	assert all("resident #" not in label for label in options)
+
+
+def test_duplicate_resident_names_are_rejected(isolated_db):
+	with pytest.raises(ValueError, match="Resident names must be unique"):
+		save_residents(
+			pd.DataFrame(
+				[
+					{"name": "Ada", "email": "ada@example.com", "max_shifts": 10, "min_shifts": None, "weight": 1.0, "active": 1},
+					{"name": "ada", "email": "ada2@example.com", "max_shifts": 10, "min_shifts": None, "weight": 1.0, "active": 1},
+				]
+			)
+		)
+
+
+def test_resident_min_shift_above_max_shift_is_rejected(isolated_db):
+	with pytest.raises(ValueError, match="Minimum shifts cannot exceed maximum shifts"):
+		save_residents(
+			pd.DataFrame(
+				[
+					{"name": "Ada", "email": "ada@example.com", "max_shifts": 3, "min_shifts": 4, "weight": 1.0, "active": 1},
+				]
+			)
+		)
 
 
 def test_duplicate_resident_colors_are_rejected(isolated_db):

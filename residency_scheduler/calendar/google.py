@@ -73,6 +73,7 @@ def publish_period_to_calendar(
 	auth_session: dict[str, Any],
 	service=None,
 	time_zone: str = DEFAULT_TIME_ZONE,
+	existing_event_ids: list[str] | None = None,
 ) -> PublishResult:
 	period = get_period(period_id)
 	assignments = get_assignments(period_id)
@@ -80,13 +81,30 @@ def publish_period_to_calendar(
 		raise ValueError("Generate assignments before publishing to Google Calendar.")
 
 	service = service or get_calendar_service(auth_session)
-	existing_event_ids = find_existing_period_events(period_id, calendar_id, auth_session, service=service, time_zone=time_zone)
+	if existing_event_ids is None:
+		existing_event_ids = find_existing_period_events(period_id, calendar_id, auth_session, service=service, time_zone=time_zone)
 	deleted_count = _delete_events(service, calendar_id, existing_event_ids)
 	clear_assignment_google_event_ids(period_id)
 
 	inserted_count = _insert_assignment_events(service, calendar_id, dict(period), assignments, time_zone=time_zone)
 
 	return PublishResult(deleted_count=deleted_count, inserted_count=inserted_count, calendar_id=calendar_id)
+
+
+def wipe_period_from_calendar(
+	period_id: int,
+	calendar_id: str,
+	auth_session: dict[str, Any],
+	service=None,
+	time_zone: str = DEFAULT_TIME_ZONE,
+	existing_event_ids: list[str] | None = None,
+) -> PublishResult:
+	service = service or get_calendar_service(auth_session)
+	if existing_event_ids is None:
+		existing_event_ids = find_existing_period_events(period_id, calendar_id, auth_session, service=service, time_zone=time_zone)
+	deleted_count = _delete_events(service, calendar_id, existing_event_ids)
+	clear_assignment_google_event_ids(period_id)
+	return PublishResult(deleted_count=deleted_count, inserted_count=0, calendar_id=calendar_id)
 
 
 def find_existing_period_events(

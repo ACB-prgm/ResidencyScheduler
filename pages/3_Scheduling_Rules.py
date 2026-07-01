@@ -17,9 +17,9 @@ from residency_scheduler.repository import (
 	delete_schedule_rule,
 	get_schedule_rules,
 )
-from residency_scheduler.ui import flash_success, render_flash_messages, select_period
+from residency_scheduler.ui import flash_success, render_page_header
 
-st.set_page_config(page_title="Special Rules", layout="wide")
+st.set_page_config(page_title="Scheduling Rules", layout="wide")
 
 RULE_TYPE_LABELS = {
 	"weekday_count": "Weekday count",
@@ -48,15 +48,15 @@ require_google_auth()
 ensure_database_initialized()
 preload_reference_data()
 
-st.title("Special Rules")
-st.caption("Add month-specific scheduling rules. New rules default to hard priority.")
-render_flash_messages()
-
-period_id = select_period("rules")
+period_id = render_page_header(
+	"Scheduling Rules",
+	"Add month-specific scheduling rules. New rules default to hard priority.",
+	month_location="rules",
+)
 residents = get_cached_residents(active_only=True)
 
 if residents.empty:
-	st.warning("Add active residents before entering special rules.")
+	st.warning("Add active residents before entering scheduling rules.")
 	st.stop()
 
 resident_options = get_cached_resident_options(active_only=True)
@@ -106,13 +106,13 @@ with form_col:
 			st.error(str(exc))
 		else:
 			clear_month_data_cache()
-			flash_success("Special rule added.")
+			flash_success("Scheduling rule added.")
 			st.rerun()
 
 with rules_col:
 	st.subheader("Current Rules")
 	if rules.empty:
-		st.info("No special rules have been added for this month.")
+		st.info("No scheduling rules have been added for this month.")
 	else:
 		for row in rules.itertuples():
 			with st.container(border=True):
@@ -125,9 +125,14 @@ with rules_col:
 				if action_col.button("Delete", key=f"delete_rule_{int(row.id)}"):
 					delete_schedule_rule(int(row.id), period_id)
 					clear_month_data_cache()
-					flash_success("Special rule deleted.")
+					flash_success("Scheduling rule deleted.")
 					st.rerun()
 
-st.info(
-	"For an away rotation with required City of Hope weekend coverage, add an Away rotation rule plus a Weekday pair count rule for Friday and Saturday with target count 1."
-)
+with st.expander("Rule examples"):
+	st.markdown(
+		"""
+		- For an away rotation with required City of Hope weekend coverage, add an Away rotation rule plus a Weekday pair count rule for Friday and Saturday with target count 1.
+		- Use Weekday count when a resident must work exactly N selected weekdays.
+		- Keep rules hard unless the solver may miss the target when needed.
+		"""
+	)

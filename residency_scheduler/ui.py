@@ -17,6 +17,24 @@ SAVED_MONTH_LOADED_KEY = "active_year_month_loaded"
 FLASH_KEY = "flash_messages"
 
 
+def render_page_header(title: str, caption: str, month_location: str | None = None) -> int | None:
+	"""Render a consistent page header and optional month selector."""
+	if month_location:
+		title_col, month_col = st.columns([3, 1], gap="large")
+		with title_col:
+			st.title(title)
+			st.caption(caption)
+		with month_col:
+			period_id = select_period(month_location)
+		render_flash_messages()
+		return period_id
+
+	st.title(title)
+	st.caption(caption)
+	render_flash_messages()
+	return None
+
+
 def select_month(location: str = "global") -> tuple[int, int]:
 	months = get_cached_calendar_months()
 	if months.empty:

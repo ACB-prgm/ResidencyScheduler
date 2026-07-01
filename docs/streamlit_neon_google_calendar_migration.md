@@ -66,7 +66,7 @@ Use Google Calendar `extendedProperties.private` for event ownership metadata:
 
 - `python -m compileall app.py pages residency_scheduler scripts tests`
 - `python -m pytest -q`
-- Streamlit smoke test on Home, Residents, Availability and Preferences, Special Rules, and Generate Schedule.
+- Streamlit smoke test on Schedule Month, Residents, Availability and Preferences, Scheduling Rules, and Generate Schedule.
 - Confirm no real secrets are tracked by git.
 - Confirm Streamlit Cloud has `connections.neon.url` configured before deployment.
 

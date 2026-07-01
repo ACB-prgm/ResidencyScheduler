@@ -19,7 +19,7 @@ from residency_scheduler.repository import (
 	default_priority_for_request_type,
 	replace_schedule_requests,
 )
-from residency_scheduler.ui import flash_success, render_flash_messages, select_period
+from residency_scheduler.ui import flash_success, render_page_header
 
 st.set_page_config(page_title="Availability and Preferences", layout="wide")
 
@@ -57,15 +57,28 @@ def _data_changed(left, right) -> bool:
 	return not left_compare.equals(right_compare)
 
 
+def _has_priority_overrides(df) -> bool:
+	if df.empty or "priority" not in df.columns or "request_type" not in df.columns:
+		return False
+	for row in df.itertuples(index=False):
+		request_type = str(getattr(row, "request_type", "") or "").strip()
+		if not request_type:
+			continue
+		priority = str(getattr(row, "priority", "") or "").strip().lower()
+		if priority and priority != default_priority_for_request_type(request_type):
+			return True
+	return False
+
+
 require_google_auth()
 ensure_database_initialized()
 preload_reference_data()
 
-st.title("Availability and Preferences")
-st.caption("Enter availability, preferences, vacation ranges, and hard preassignments for the selected month.")
-render_flash_messages()
-
-period_id = select_period("requests")
+period_id = render_page_header(
+	"Availability and Preferences",
+	"Enter availability, preferences, vacation ranges, and hard preassignments for the selected month.",
+	month_location="requests",
+)
 residents = get_cached_residents(active_only=True)
 
 if residents.empty:
@@ -78,6 +91,12 @@ period = get_cached_period(period_id)
 default_request_date = date(int(period["year"]), int(period["month"]), 1)
 
 existing = get_cached_schedule_requests_for_editor(period_id)
+show_priority = st.checkbox("Show priority overrides", value=_has_priority_overrides(existing))
+metric_cols = st.columns(3)
+metric_cols[0].metric("Active residents", len(residents))
+metric_cols[1].metric("Active requests", len(existing))
+metric_cols[2].metric("Request types", int(existing["request_type"].nunique()) if not existing.empty else 0)
+
 if st.session_state.get(EDITOR_PERIOD_KEY) != period_id:
 	st.session_state[EDITOR_PERIOD_KEY] = period_id
 	st.session_state[EDITOR_DATA_KEY] = _normalize_editor_dates(existing)
@@ -85,23 +104,29 @@ if st.session_state.get(EDITOR_PERIOD_KEY) != period_id:
 
 editor_version = int(st.session_state.get(EDITOR_VERSION_KEY, 0))
 st.session_state[EDITOR_DATA_KEY] = _normalize_editor_dates(st.session_state[EDITOR_DATA_KEY])
+column_order = ["resident", "request_type", "start_date", "end_date", "priority", "reason"]
+editor_data = st.session_state[EDITOR_DATA_KEY]
+for column in column_order:
+	if column not in editor_data.columns:
+		editor_data[column] = None
+editor_data = editor_data[column_order]
 edited = st.data_editor(
-	st.session_state[EDITOR_DATA_KEY],
+	editor_data,
 	key=f"{EDITOR_KEY}_{editor_version}",
 	num_rows="dynamic",
 	width="stretch",
 	column_config={
 		"resident": st.column_config.SelectboxColumn("Resident", options=list(resident_options.keys()), required=True),
+		"request_type": st.column_config.SelectboxColumn("Request type", options=request_type_options, required=True),
 		"start_date": st.column_config.DateColumn("Start date", required=True, default=default_request_date),
 		"end_date": st.column_config.DateColumn("End date", required=True, default=default_request_date),
-		"request_type": st.column_config.SelectboxColumn("Request type", options=request_type_options, required=True),
-		"priority": st.column_config.SelectboxColumn("Priority", options=["hard", "soft"]),
+		"priority": st.column_config.SelectboxColumn("Priority", options=["hard", "soft"]) if show_priority else None,
 		"reason": st.column_config.TextColumn("Reason"),
 	},
 )
 edited = _normalize_editor_dates(edited)
 edited_with_defaults = _with_priority_defaults(edited)
-if _data_changed(edited, edited_with_defaults):
+if show_priority and _data_changed(edited, edited_with_defaults):
 	st.session_state[EDITOR_DATA_KEY] = _normalize_editor_dates(edited_with_defaults)
 	st.session_state[EDITOR_VERSION_KEY] = editor_version + 1
 	st.rerun()
@@ -118,12 +143,11 @@ if st.button("Save availability and preferences", type="primary"):
 		st.session_state[EDITOR_PERIOD_KEY] = None
 		st.rerun()
 
-st.markdown(
-	"""
-	### Priority defaults
-
-	- `hard`: vacation, unavailable, approved absence, medical leave, and assign.
-	- `soft`: prefer off and prefer work.
-	- Vacation ranges automatically add a soft prefer-work on the Thursday before vacation starts when that date is in the same month.
-	"""
-)
+with st.expander("Priority rules"):
+	st.markdown(
+		"""
+		- `hard`: vacation, unavailable, approved absence, medical leave, and assign.
+		- `soft`: prefer off and prefer work.
+		- Vacation ranges automatically add a soft prefer-work on the Thursday before vacation starts when that date is in the same month.
+		"""
+	)

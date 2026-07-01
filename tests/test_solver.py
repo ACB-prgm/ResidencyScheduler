@@ -157,34 +157,30 @@ def test_hard_assign_request_is_honored(isolated_db):
 def test_hard_assign_conflict_with_hard_unavailable_is_rejected(isolated_db):
 	add_residents(["Ada", "Ben", "Cam", "Dee"], max_shifts=10)
 	period_id = get_or_create_schedule_period(2026, 4, required_count=1)
-	replace_schedule_requests(
-		period_id,
-		pd.DataFrame(
-			[
-				{
-					"resident": "Ada · resident #1",
-					"start_date": "2026-04-02",
-					"end_date": "2026-04-02",
-					"request_type": "unavailable",
-					"priority": "hard",
-					"reason": "Clinic",
-				},
-				{
-					"resident": "Ada · resident #1",
-					"start_date": "2026-04-02",
-					"end_date": "2026-04-02",
-					"request_type": "assign",
-					"priority": "hard",
-					"reason": "Conflict",
-				},
-			]
-		),
-	)
-
-	result = solve_period(period_id, max_time_seconds=5)
-
-	assert result.status == "INVALID_INPUT"
-	assert any("Hard request conflict" in warning for warning in result.warnings)
+	with pytest.raises(ValueError, match="Conflicting hard requests"):
+		replace_schedule_requests(
+			period_id,
+			pd.DataFrame(
+				[
+					{
+						"resident": "Ada · resident #1",
+						"start_date": "2026-04-02",
+						"end_date": "2026-04-02",
+						"request_type": "unavailable",
+						"priority": "hard",
+						"reason": "Clinic",
+					},
+					{
+						"resident": "Ada · resident #1",
+						"start_date": "2026-04-02",
+						"end_date": "2026-04-02",
+						"request_type": "assign",
+						"priority": "hard",
+						"reason": "Conflict",
+					},
+				]
+			),
+		)
 
 
 def test_too_many_hard_assign_requests_on_one_date_is_rejected(isolated_db):
