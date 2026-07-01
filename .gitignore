@@ -10,11 +10,13 @@ env/
 .streamlit/secrets.toml
 
 # Local data / credentials
+secrets/
 data/*.sqlite
 data/*.sqlite3
 data/*.db
 credentials.json
 token.json
+NeonPostgres*
 *.log
 
 # Build artifacts

@@ -10,6 +10,8 @@ from ortools.sat.python import cp_model
 
 from residency_scheduler.repository import (
 	HARD_UNAVAILABLE_TYPES,
+	SCHEDULE_RULE_TYPES,
+	WEEKEND_WEEKDAYS,
 	get_expanded_schedule_requests,
 	get_period,
 	get_prior_assignment_history,
@@ -25,6 +27,7 @@ WEEKEND_SURPLUS_WEIGHT_PENALTY = 150
 ROLLING_TOTAL_SURPLUS_PENALTY = 800
 ROLLING_WEEKEND_SURPLUS_PENALTY = 1200
 RANDOM_TIE_BREAK_MAX = 100
+SOFT_AWAY_ROTATION_PENALTY = 100000
 
 
 @dataclass(frozen=True)
@@ -82,6 +85,18 @@ def solve_period(period_id: int, max_time_seconds: int = 30, random_seed: int | 
 	for row in hard_assignments.itertuples():
 		model.Add(works[(int(row.resident_id), str(row.work_date))] == 1)
 
+	hard_away_allowed_dates = _explicit_hard_rule_dates(rules, hard_assignments, dates)
+	hard_away_rules = rules[
+		(rules["priority"].str.lower() == "hard")
+		& (rules["rule_type"].str.lower() == "away_rotation")
+	]
+	for row in hard_away_rules.itertuples():
+		resident_id = int(row.resident_id)
+		allowed_dates = hard_away_allowed_dates.get(resident_id, set())
+		for work_date in date_keys:
+			if work_date not in allowed_dates:
+				model.Add(works[(resident_id, work_date)] == 0)
+
 	for row in residents.itertuples():
 		if pd.notna(row.max_shifts):
 			model.Add(sum(works[(int(row.id), work_date)] for work_date in date_keys) <= int(row.max_shifts))
@@ -104,7 +119,7 @@ def solve_period(period_id: int, max_time_seconds: int = 30, random_seed: int | 
 		surplus_weight_penalty=TOTAL_SURPLUS_WEIGHT_PENALTY,
 	)
 
-	weekend_dates = [d.isoformat() for d in dates if d.weekday() >= 5]
+	weekend_dates = [d.isoformat() for d in dates if d.weekday() in WEEKEND_WEEKDAYS]
 	if weekend_dates:
 		weekend_shift_counts = {
 			resident_id: sum(works[(resident_id, work_date)] for work_date in weekend_dates)
@@ -142,6 +157,12 @@ def solve_period(period_id: int, max_time_seconds: int = 30, random_seed: int | 
 			objective_terms.append(works[(resident_id, work_date)] * 100)
 		elif request_type in {"prefer_work", "assign"}:
 			objective_terms.append((1 - works[(resident_id, work_date)]) * 10)
+
+	for row in rules.itertuples():
+		if str(row.rule_type).lower() == "away_rotation" and str(row.priority).lower() == "soft":
+			resident_id = int(row.resident_id)
+			for work_date in date_keys:
+				objective_terms.append(works[(resident_id, work_date)] * SOFT_AWAY_ROTATION_PENALTY)
 
 	for resident_id in resident_ids:
 		for first, second in zip(date_keys, date_keys[1:]):
@@ -192,6 +213,8 @@ def solve_period(period_id: int, max_time_seconds: int = 30, random_seed: int | 
 					deviation = model.NewIntVar(0, max_count, f"rule_{suffix}_deviation_{row.id}")
 					model.AddAbsEquality(deviation, total - target_count)
 					objective_terms.append(deviation * 60)
+		elif rule_type == "away_rotation":
+			continue
 
 	random_terms = _random_tie_break_terms(
 		works=works,
@@ -248,6 +271,27 @@ def _paired_date_keys(dates: list[date], weekday: int, paired_weekday: int) -> l
 		if first.weekday() == weekday and second in date_set and second.weekday() == paired_weekday:
 			pairs.append((first.isoformat(), second.isoformat()))
 	return pairs
+
+
+def _explicit_hard_rule_dates(rules: pd.DataFrame, hard_assignments: pd.DataFrame, dates: list[date]) -> dict[int, set[str]]:
+	allowed: dict[int, set[str]] = {}
+	for row in hard_assignments.itertuples():
+		allowed.setdefault(int(row.resident_id), set()).add(str(row.work_date))
+
+	hard_rules = rules[rules["priority"].str.lower() == "hard"] if not rules.empty else rules
+	for row in hard_rules.itertuples():
+		rule_type = str(row.rule_type).lower()
+		resident_id = int(row.resident_id)
+		target_count = int(row.target_count)
+		if rule_type == "weekday_count" and target_count > 0:
+			allowed.setdefault(resident_id, set()).update(d.isoformat() for d in dates if d.weekday() == int(row.weekday))
+		elif rule_type == "weekday_pair_count" and target_count > 0 and pd.notna(row.paired_weekday):
+			pair_dates = _paired_date_keys(dates, int(row.weekday), int(row.paired_weekday))
+			resident_dates = allowed.setdefault(resident_id, set())
+			for first, second in pair_dates:
+				resident_dates.add(first)
+				resident_dates.add(second)
+	return allowed
 
 
 def _add_distribution_objective(
@@ -385,15 +429,15 @@ def _validate_inputs(
 		if int(row.resident_id) not in valid_residents:
 			errors.append(f"Request references inactive/missing resident_id {row.resident_id}.")
 		if str(row.work_date) not in valid_dates:
-			errors.append(f"Request date {row.work_date} is outside the draft month.")
+			errors.append(f"Request date {row.work_date} is outside the selected month.")
 
 	for row in rules.itertuples():
 		if int(row.resident_id) not in valid_residents:
 			errors.append(f"Rule references inactive/missing resident_id {row.resident_id}.")
 		rule_type = str(row.rule_type).lower()
-		if rule_type not in {"weekday_count", "weekday_pair_count"}:
-			errors.append("Only weekday_count and weekday_pair_count rules are supported.")
-		if str(row.comparator).lower() != "exactly":
+		if rule_type not in SCHEDULE_RULE_TYPES:
+			errors.append("Only weekday_count, weekday_pair_count, and away_rotation rules are supported.")
+		if rule_type != "away_rotation" and str(row.comparator).lower() != "exactly":
 			errors.append("Only exactly rules are supported.")
 		target_count = int(row.target_count)
 		if rule_type == "weekday_pair_count":
@@ -438,11 +482,22 @@ def _validate_inputs(
 				f"Hard request conflict: resident_id {row.resident_id} is assigned on {row.work_date} but marked hard unavailable."
 			)
 
+	hard_away_rules = rules[
+		(rules["priority"].str.lower() == "hard")
+		& (rules["rule_type"].str.lower() == "away_rotation")
+	]
+	away_residents = set(hard_away_rules["resident_id"].astype(int).tolist()) if not hard_away_rules.empty else set()
+	hard_away_allowed_dates = _explicit_hard_rule_dates(rules, hard_assignments, dates)
 	for work_date in valid_dates:
 		unavailable_residents = set(
 			hard_unavailable.loc[hard_unavailable["work_date"].astype(str) == work_date, "resident_id"].astype(int).tolist()
 		)
-		available_count = len(valid_residents - unavailable_residents)
+		away_blocked_residents = {
+			resident_id
+			for resident_id in away_residents
+			if work_date not in hard_away_allowed_dates.get(resident_id, set())
+		}
+		available_count = len(valid_residents - unavailable_residents - away_blocked_residents)
 		if available_count < required_count:
 			errors.append(f"{work_date} has only {available_count} available resident(s), but requires {required_count}.")
 

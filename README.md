@@ -1,11 +1,12 @@
 # Residency Scheduler
 
-Local-first MVP for generating monthly medical residency night-shift schedules.
+MVP for generating monthly medical residency night-shift schedules.
 
 The app uses:
 
 - Streamlit for the UI
-- SQLite for local persistence
+- Neon Postgres for durable persistence, with local SQLite fallback for tests and local read-through caching
+- Google OAuth sign-in before scheduler access
 - Google OR-Tools CP-SAT for schedule optimization
 - FullCalendar schedule review and local ICS export
 
@@ -14,11 +15,11 @@ The app uses:
 - One night shift per calendar day
 - Shift time: 6:00 PM to 7:00 AM the next day
 - `required_count` residents required per night, defaulting to one
-- Each month can have multiple named drafts
+- Each year-month has one editable schedule
 - Schedule requests support single dates and date ranges
 - Vacation, unavailable, approved absence, medical leave, and assign requests default to hard priority
 - Prefer off and prefer work requests default to soft priority
-- Vacation ranges automatically add a soft prefer-work request for the Thursday before vacation starts when that date is in the same draft month
+- Vacation ranges automatically add a soft prefer-work request for the Thursday before vacation starts when that date is in the same month
 - Generic special rules support weekday counts and adjacent weekday pairs such as Friday+Saturday for a resident
 - Workload, weekend shifts, preferences, back-to-back shifts, and rolling surplus fairness are optimized where possible
 
@@ -50,26 +51,66 @@ streamlit run app.py
 
 ## Data Storage
 
-By default, the app stores local data in:
+For deployment, configure Streamlit secrets with the Neon connection URL:
+
+```toml
+[connections.neon]
+url = "postgresql+psycopg://USER:PASSWORD@HOST/DBNAME?sslmode=require"
+```
+
+For local development, mirror Streamlit Cloud by putting the primary database URL in `.streamlit/secrets.toml` under `connections.neon.url`. The app also accepts `RESIDENCY_SCHEDULER_DATABASE_URL`, `DATABASE_URL`, or `NEON_DATABASE_URL` for scripts and tests. When Neon is configured, it remains the source of truth and local SQLite is used only as a read-through cache to avoid repeated remote loads.
+
+If no Neon/Postgres URL is configured, the app falls back to a local SQLite source database:
 
 ```text
 data/residency_scheduler.sqlite
 ```
 
+The local read-through cache is stored separately in:
+
+```text
+data/residency_scheduler_cache.sqlite
+```
+
 Set `RESIDENCY_SCHEDULER_DB` to use another SQLite file. Tests use this override to avoid touching the local app database.
 
-Database files, credentials, tokens, virtual environments, and build artifacts are ignored by git.
+Database files, local secrets, credentials, tokens, virtual environments, and build artifacts are ignored by git.
+
+## Google Sign-In
+
+The app requires Google sign-in before any scheduler page loads. For local testing, use a Google OAuth Web application client with `http://localhost:8501` added as an authorized redirect URI. For Streamlit deployment, add the deployed root URL, for example `https://HuntingtonHealthResidencyScheduler.streamlit.app`.
+
+Configure deployment secrets:
+
+```toml
+[google]
+client_id = "..."
+client_secret = "..."
+redirect_uri = "https://HuntingtonHealthResidencyScheduler.streamlit.app"
+token_encryption_key = "base64-url-safe-fernet-key"
+allowed_domains = ["huntingtonhealth.org"]
+allowed_emails = ["user@huntingtonhealth.org"]
+```
+
+For local development, copy the relevant values from the ignored Google client JSON into `.streamlit/secrets.toml` so the local app uses the same `st.secrets` interface as Streamlit Cloud. Authenticated user details are cached in the Streamlit session so page navigation does not reread Google or Neon. The initial sign-in requests Calendar access so Generate Schedule can publish to a selected writable Google Calendar. When `token_encryption_key` is configured, OAuth credentials are stored encrypted in the primary database and the browser keeps an opaque remember-session cookie. New app sessions restore the encrypted token, refresh it when needed, and only require Google sign-in again when the stored token cannot be refreshed.
+
+Add these Google Calendar API scopes to the OAuth consent screen:
+
+```text
+https://www.googleapis.com/auth/calendar.calendarlist.readonly
+https://www.googleapis.com/auth/calendar.events
+```
 
 ## MVP Workflow
 
-1. Create/select a year-month and named draft.
+1. Select a year-month.
 2. Maintain resident roster. Existing resident IDs are preserved; removed rows are marked inactive.
 3. Enter availability, preferences, vacation ranges, and hard assignments using resident-name dropdowns.
-4. Enter special weekday-count and adjacent-pair rules.
+4. Enter special weekday-count, adjacent-pair, and away-rotation rules.
 5. Generate schedule with OR-Tools.
 6. Review the FullCalendar view, assignments, workload, weekend distribution, and prefer-off violations.
 7. Manually reassign unlocked generated shifts with hard-constraint validation.
-8. Download a PGY-grouped ICS ZIP for manual calendar import.
+8. Download a single call-schedule ICS file or publish directly to Google Calendar.
 
 ## Solver Notes
 
@@ -80,13 +121,13 @@ Hard constraints:
 - Hard assign requests are honored.
 - Hard assign requests cannot exceed required coverage for a date.
 - Residents cannot exceed configured `max_shifts`.
-- Hard weekday-count and adjacent-pair rules are enforced exactly.
+- Hard weekday-count, adjacent-pair, and away-rotation rules are enforced.
 
 Soft objective weights:
 
 - Total workload is distributed by floor/ceiling fairness first.
-- Sat/Sun weekend workload is distributed by floor/ceiling fairness first.
-- Previous 3 calendar months discourage repeating surplus total or Sat/Sun weekend shifts for the same resident.
+- Friday/Saturday/Sunday weekend workload is distributed by floor/ceiling fairness first.
+- Previous 3 calendar months discourage repeating surplus total or weekend shifts for the same resident.
 - Higher PGY levels are protected from surplus total and weekend shifts where feasible.
 - Equal-cost leftover assignments use fresh random tie-breaking on each generate run.
 - Prefer-off violation: 100
@@ -98,13 +139,15 @@ The solver validates common infeasible inputs before solving and records each ru
 
 ## Calendar Export
 
-The Generate Schedule page provides a downloadable ZIP of PGY-specific `.ics` files for manual import into Google Calendar or another calendar app.
+The Generate Schedule page provides a downloadable call-schedule `.ics` file and a Google Calendar publish workflow.
 
-- ICS exports use stable assignment-based UIDs and calendar names such as `2026-08-PGY3`.
-- The file is an import artifact, not a live subscribed calendar feed.
-- Re-import behavior is handled by the target calendar application.
+- ICS exports use stable assignment-based UIDs and calendar names such as `2026-08-call-schedule`.
+- Google Calendar publishing wipes prior Residency Scheduler events for the selected month/calendar, then inserts the current assignments.
+- Published Google events include private extended properties identifying the app, schedule month, period ID, and assignment ID.
 
 See `.env.example` for optional local configuration.
+
+For user-facing workflow details and rule examples, see [docs/user_guide.md](docs/user_guide.md).
 
 ## Tests
 
@@ -112,4 +155,4 @@ See `.env.example` for optional local configuration.
 python -m pytest -q
 ```
 
-The test suite covers named drafts, seeded calendar months, request date ranges, vacation-derived Thursday preferences, hard assign requests, max-shift infeasibility, soft preferences, weekday-count and adjacent-pair rules, calendar summaries, manual edits, and Streamlit page smoke tests.
+The test suite covers monthly schedule periods, seeded calendar months, request date ranges, vacation-derived Thursday preferences, hard assign requests, max-shift infeasibility, soft preferences, weekday-count and adjacent-pair rules, calendar summaries, manual edits, and Streamlit page smoke tests.

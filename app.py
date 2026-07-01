@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import streamlit as st
 
-from residency_scheduler.db import init_db
-from residency_scheduler.repository import create_schedule_period, delete_schedule_period, get_schedule_periods, rename_schedule_period
-from residency_scheduler.ui import clear_active_draft, flash_error, flash_success, render_flash_messages, select_draft, select_month
+from residency_scheduler.auth import require_google_auth
+from residency_scheduler.cache import clear_month_data_cache, ensure_database_initialized, get_cached_period, preload_reference_data
+from residency_scheduler.repository import update_schedule_period_settings
+from residency_scheduler.ui import flash_error, flash_success, render_flash_messages, select_period
 
 st.set_page_config(
 	page_title="Residency Scheduler",
@@ -12,17 +13,19 @@ st.set_page_config(
 	layout="wide",
 )
 
-init_db()
+require_google_auth()
+ensure_database_initialized()
+preload_reference_data()
 
 st.title("Residency Scheduler")
-st.caption("Local-first monthly night-shift scheduler for medical residency programs.")
+st.caption("Monthly night-shift scheduler for medical residency programs.")
 render_flash_messages()
 
 with st.sidebar:
 	st.header("Current workflow")
 	st.markdown(
 		"""
-		1. Select year-month and draft  
+		1. Select year-month  
 		2. Maintain residents  
 		3. Enter availability and preferences  
 		4. Enter special rules  
@@ -30,77 +33,36 @@ with st.sidebar:
 		"""
 	)
 
-st.subheader("Schedule drafts")
-year, month = select_month("home")
+st.subheader("Schedule month")
+period_id = select_period("home")
+period = get_cached_period(period_id)
 
-drafts = get_schedule_periods(year=year, month=month)
-selected_period_id = None
-if drafts.empty:
-	st.info("No drafts exist for this month yet.")
-else:
-	selected_period_id = select_draft(year, month, allow_empty=True, location="home")
-	st.dataframe(
-		drafts[["id", "draft_name", "year", "month", "required_count", "status", "created_at"]],
-		use_container_width=True,
-		hide_index=True,
+cols = st.columns(4)
+cols[0].metric("Year", int(period["year"]))
+cols[1].metric("Month", f"{int(period['month']):02d}")
+cols[2].metric("Schedule ID", int(period["id"]))
+cols[3].metric("Residents/night", int(period["required_count"]))
+
+with st.form("month_settings"):
+	st.markdown("### Month settings")
+	required_count = st.number_input(
+		"Residents per night",
+		min_value=1,
+		max_value=10,
+		value=int(period["required_count"]),
+		step=1,
 	)
+	submitted = st.form_submit_button("Save month settings", type="primary")
 
-with st.form("create_draft"):
-	st.markdown("### Create draft")
-	cols = st.columns(2)
-	draft_name = cols[0].text_input("Draft name", value=f"Draft {len(drafts) + 1}")
-	required_count = cols[1].number_input("Residents per night", min_value=1, max_value=10, value=1, step=1)
-	create_submitted = st.form_submit_button("Create draft", type="primary")
-
-if create_submitted:
+if submitted:
 	try:
-		period_id = create_schedule_period(
-			year=year,
-			month=month,
-			draft_name=draft_name,
-			required_count=int(required_count),
-			google_calendar_id=None,
-		)
+		update_schedule_period_settings(int(period_id), int(required_count), period.get("google_calendar_id"))
 	except ValueError as exc:
 		flash_error(str(exc))
 	else:
-		flash_success(f"Created {draft_name.strip() or 'Draft 1'} as draft #{period_id}.")
+		clear_month_data_cache()
+		flash_success("Month settings saved.")
 	st.rerun()
-
-if selected_period_id is not None:
-	selected_draft = drafts[drafts["id"].astype(int) == int(selected_period_id)].iloc[0]
-	with st.form("rename_draft"):
-		st.markdown("### Rename selected draft")
-		new_draft_name = st.text_input("Draft name", value=str(selected_draft["draft_name"]))
-		rename_submitted = st.form_submit_button("Rename draft")
-
-	if rename_submitted:
-		try:
-			rename_schedule_period(int(selected_period_id), new_draft_name)
-		except ValueError as exc:
-			flash_error(str(exc))
-		else:
-			flash_success("Draft renamed.")
-		st.rerun()
-
-	with st.form("delete_draft"):
-		st.markdown("### Delete selected draft")
-		st.warning("Deleting a draft permanently removes its requests, rules, assignments, and solver runs.")
-		confirm_delete = st.checkbox(f"Permanently delete draft #{int(selected_period_id)}")
-		delete_submitted = st.form_submit_button("Delete draft")
-
-	if delete_submitted:
-		if not confirm_delete:
-			flash_error("Confirm deletion before deleting the draft.")
-		else:
-			try:
-				delete_schedule_period(int(selected_period_id))
-			except ValueError as exc:
-				flash_error(str(exc))
-			else:
-				clear_active_draft()
-				flash_success("Draft deleted.")
-		st.rerun()
 
 st.markdown("---")
 st.markdown(

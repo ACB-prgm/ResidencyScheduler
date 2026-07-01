@@ -5,16 +5,23 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
-from residency_scheduler.db import init_db
+from residency_scheduler.auth import require_google_auth
+from residency_scheduler.cache import (
+	clear_month_data_cache,
+	ensure_database_initialized,
+	get_cached_period,
+	get_cached_resident_options,
+	get_cached_residents,
+	get_cached_schedule_requests_for_editor,
+	preload_reference_data,
+)
 from residency_scheduler.repository import (
 	default_priority_for_request_type,
-	get_resident_options,
-	get_period,
-	get_residents,
-	get_schedule_requests_for_editor,
 	replace_schedule_requests,
 )
 from residency_scheduler.ui import flash_success, render_flash_messages, select_period
+
+st.set_page_config(page_title="Availability and Preferences", layout="wide")
 
 EDITOR_KEY = "schedule_requests_editor"
 EDITOR_DATA_KEY = "schedule_requests_editor_data"
@@ -50,25 +57,27 @@ def _data_changed(left, right) -> bool:
 	return not left_compare.equals(right_compare)
 
 
-init_db()
+require_google_auth()
+ensure_database_initialized()
+preload_reference_data()
 
 st.title("Availability and Preferences")
-st.caption("Enter availability, preferences, vacation ranges, and hard preassignments for a draft.")
+st.caption("Enter availability, preferences, vacation ranges, and hard preassignments for the selected month.")
 render_flash_messages()
 
 period_id = select_period("requests")
-residents = get_residents(active_only=True)
+residents = get_cached_residents(active_only=True)
 
 if residents.empty:
 	st.warning("Add active residents before entering schedule requests.")
 	st.stop()
 
-resident_options = get_resident_options(active_only=True)
+resident_options = get_cached_resident_options(active_only=True)
 request_type_options = ["vacation", "unavailable", "approved_absence", "medical_leave", "prefer_off", "prefer_work", "assign"]
-period = get_period(period_id)
+period = get_cached_period(period_id)
 default_request_date = date(int(period["year"]), int(period["month"]), 1)
 
-existing = get_schedule_requests_for_editor(period_id)
+existing = get_cached_schedule_requests_for_editor(period_id)
 if st.session_state.get(EDITOR_PERIOD_KEY) != period_id:
 	st.session_state[EDITOR_PERIOD_KEY] = period_id
 	st.session_state[EDITOR_DATA_KEY] = _normalize_editor_dates(existing)
@@ -80,7 +89,7 @@ edited = st.data_editor(
 	st.session_state[EDITOR_DATA_KEY],
 	key=f"{EDITOR_KEY}_{editor_version}",
 	num_rows="dynamic",
-	use_container_width=True,
+	width="stretch",
 	column_config={
 		"resident": st.column_config.SelectboxColumn("Resident", options=list(resident_options.keys()), required=True),
 		"start_date": st.column_config.DateColumn("Start date", required=True, default=default_request_date),
@@ -104,6 +113,7 @@ if st.button("Save availability and preferences", type="primary"):
 	except ValueError as exc:
 		st.error(str(exc))
 	else:
+		clear_month_data_cache()
 		flash_success("Availability and preferences saved.")
 		st.session_state[EDITOR_PERIOD_KEY] = None
 		st.rerun()
@@ -114,6 +124,6 @@ st.markdown(
 
 	- `hard`: vacation, unavailable, approved absence, medical leave, and assign.
 	- `soft`: prefer off and prefer work.
-	- Vacation ranges automatically add a soft prefer-work on the Thursday before vacation starts when that date is in the same draft month.
+	- Vacation ranges automatically add a soft prefer-work on the Thursday before vacation starts when that date is in the same month.
 	"""
 )

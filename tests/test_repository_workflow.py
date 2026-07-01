@@ -6,22 +6,25 @@ import pytest
 from residency_scheduler.colors import RESIDENT_COLOR_PALETTE
 from residency_scheduler.db import init_db
 from residency_scheduler.repository import (
-	create_schedule_period,
-	delete_schedule_period,
+	get_or_create_schedule_period,
 	get_assignment_calendar,
 	get_calendar_months,
 	get_assignments,
+	get_period,
 	get_prior_assignment_history,
 	get_residents,
+	get_schedule_rules,
 	get_schedule_periods,
 	get_schedule_requests_for_editor,
-	rename_schedule_period,
+	get_workload_summary,
 	replace_schedule_requests,
+	replace_schedule_rules,
 	save_assignments,
 	save_residents,
 	seed_months,
 	swap_assignment_residents,
 	update_assignment_resident,
+	update_schedule_period_settings,
 )
 from residency_scheduler.solver import solve_period
 
@@ -41,16 +44,17 @@ def test_calendar_month_seeding_creates_ten_years(isolated_db):
 	assert {"2030-01", "2039-12"}.issubset(set(window["month_key"]))
 
 
-def test_multiple_drafts_can_share_year_month(isolated_db):
-	first = create_schedule_period(2026, 9, "First draft", 1, None)
-	second = create_schedule_period(2026, 9, "Second draft", 1, None)
+def test_schedule_period_is_unique_per_year_month(isolated_db):
+	first = get_or_create_schedule_period(2026, 9, required_count=1)
+	second = get_or_create_schedule_period(2026, 9, required_count=3)
 
-	drafts = get_schedule_periods(year=2026, month=9)
-	assert {first, second}.issubset(set(drafts["id"].astype(int)))
-	assert set(drafts["draft_name"]) >= {"First draft", "Second draft"}
+	periods = get_schedule_periods(year=2026, month=9)
+	assert first == second
+	assert len(periods) == 1
+	assert int(periods.iloc[0]["id"]) == first
 
 
-def test_rename_and_delete_draft_updates_drafts_and_cascades_assignments(isolated_db):
+def test_month_settings_update_selected_period(isolated_db):
 	save_residents(
 		pd.DataFrame(
 			[
@@ -58,27 +62,82 @@ def test_rename_and_delete_draft_updates_drafts_and_cascades_assignments(isolate
 			]
 		)
 	)
-	period_id = create_schedule_period(2026, 9, "Old name", 1, None)
+	period_id = get_or_create_schedule_period(2026, 9, required_count=1)
 	save_assignments(period_id, [{"work_date": "2026-09-01", "resident_id": 1}])
 
-	rename_schedule_period(period_id, "New name")
-	drafts = get_schedule_periods(year=2026, month=9)
+	update_schedule_period_settings(period_id, required_count=2, google_calendar_id="calendar@example.com")
+	period = get_period(period_id)
 
-	assert drafts.loc[drafts["id"].astype(int) == period_id, "draft_name"].iloc[0] == "New name"
-
-	delete_schedule_period(period_id)
-
-	assert period_id not in set(get_schedule_periods(year=2026, month=9)["id"].astype(int))
-	assert get_assignments(period_id).empty
+	assert int(period["required_count"]) == 2
+	assert period["google_calendar_id"] == "calendar@example.com"
+	assert not get_assignments(period_id).empty
 
 
 def test_empty_request_editor_has_no_placeholder_rows(isolated_db):
-	period_id = create_schedule_period(2026, 10, "Empty request draft", 1, None)
+	period_id = get_or_create_schedule_period(2026, 10, required_count=1)
 
 	editor = get_schedule_requests_for_editor(period_id)
 
 	assert editor.empty
 	assert list(editor.columns) == ["resident", "start_date", "end_date", "request_type", "priority", "reason"]
+
+
+def test_away_rotation_rule_saves_without_weekday_fields_and_defaults_hard(isolated_db):
+	save_residents(
+		pd.DataFrame(
+			[
+				{"name": "Ada", "email": "ada@example.com", "max_shifts": 10, "min_shifts": None, "weight": 1, "active": 1},
+			]
+		)
+	)
+	period_id = get_or_create_schedule_period(2026, 10, required_count=1)
+
+	replace_schedule_rules(
+		period_id,
+		pd.DataFrame(
+			[
+				{
+					"resident": "Ada · resident #1",
+					"rule_type": "away_rotation",
+					"priority": "",
+					"reason": "Away rotation",
+				}
+			]
+		),
+	)
+
+	rules = get_schedule_rules(period_id)
+	assert len(rules) == 1
+	assert rules.iloc[0]["rule_type"] == "away_rotation"
+	assert rules.iloc[0]["priority"] == "hard"
+	assert int(rules.iloc[0]["target_count"]) == 0
+
+
+def test_weekday_rule_still_requires_weekday(isolated_db):
+	save_residents(
+		pd.DataFrame(
+			[
+				{"name": "Ada", "email": "ada@example.com", "max_shifts": 10, "min_shifts": None, "weight": 1, "active": 1},
+			]
+		)
+	)
+	period_id = get_or_create_schedule_period(2026, 10, required_count=1)
+
+	with pytest.raises(ValueError, match="Weekday is required"):
+		replace_schedule_rules(
+			period_id,
+			pd.DataFrame(
+				[
+					{
+						"resident": "Ada · resident #1",
+						"rule_type": "weekday_count",
+						"priority": "hard",
+						"target_count": 1,
+						"reason": "",
+					}
+				]
+			),
+		)
 
 
 def test_resident_edits_preserve_existing_ids(isolated_db):
@@ -172,7 +231,7 @@ def test_manual_reassignment_marks_assignment_manual_and_can_create_assign_reque
 			]
 		)
 	)
-	period_id = create_schedule_period(2026, 8, "Manual draft", 1, None)
+	period_id = get_or_create_schedule_period(2026, 8, required_count=1)
 	result = solve_period(period_id, max_time_seconds=5)
 	assert result.status in {"OPTIMAL", "FEASIBLE"}
 
@@ -201,7 +260,7 @@ def test_swap_assignment_residents_swaps_unlocked_assignments_and_can_lock(isola
 			]
 		)
 	)
-	period_id = create_schedule_period(2026, 8, "Swap draft", 1, None)
+	period_id = get_or_create_schedule_period(2026, 8, required_count=1)
 	save_assignments(
 		period_id,
 		[
@@ -233,7 +292,7 @@ def test_swap_assignment_residents_rejects_hard_unavailable_target(isolated_db):
 			]
 		)
 	)
-	period_id = create_schedule_period(2026, 8, "Swap unavailable draft", 1, None)
+	period_id = get_or_create_schedule_period(2026, 8, required_count=1)
 	save_assignments(
 		period_id,
 		[
@@ -271,7 +330,7 @@ def test_assignment_calendar_returns_month_grid(isolated_db):
 			]
 		)
 	)
-	period_id = create_schedule_period(2026, 11, "Calendar draft", 1, None)
+	period_id = get_or_create_schedule_period(2026, 11, required_count=1)
 	assert solve_period(period_id, max_time_seconds=5).assignments
 
 	calendar_df = get_assignment_calendar(period_id)
@@ -280,7 +339,7 @@ def test_assignment_calendar_returns_month_grid(isolated_db):
 	assert calendar_df.astype(str).apply(lambda col: col.str.contains("Ada|Ben", regex=True)).any().any()
 
 
-def test_prior_assignment_history_skips_missing_months_and_uses_latest_draft(isolated_db):
+def test_prior_assignment_history_skips_missing_months_with_single_month_periods(isolated_db):
 	save_residents(
 		pd.DataFrame(
 			[
@@ -289,25 +348,49 @@ def test_prior_assignment_history_skips_missing_months_and_uses_latest_draft(iso
 			]
 		)
 	)
-	june_id = create_schedule_period(2026, 6, "June draft", 1, None)
-	july_id = create_schedule_period(2026, 7, "July empty draft", 1, None)
-	august_old_id = create_schedule_period(2026, 8, "August old draft", 1, None)
-	august_latest_id = create_schedule_period(2026, 8, "August latest draft", 1, None)
-	current_id = create_schedule_period(2026, 9, "Current draft", 1, None)
+	june_id = get_or_create_schedule_period(2026, 6, required_count=1)
+	july_id = get_or_create_schedule_period(2026, 7, required_count=1)
+	august_id = get_or_create_schedule_period(2026, 8, required_count=1)
+	current_id = get_or_create_schedule_period(2026, 9, required_count=1)
 	save_assignments(
 		june_id,
 		[
+			{"work_date": "2026-06-05", "resident_id": 1},
 			{"work_date": "2026-06-06", "resident_id": 1},
 			{"work_date": "2026-06-08", "resident_id": 2},
 		],
 	)
-	save_assignments(august_old_id, [{"work_date": "2026-08-01", "resident_id": 1}])
-	save_assignments(august_latest_id, [{"work_date": "2026-08-02", "resident_id": 2}])
+	save_assignments(august_id, [{"work_date": "2026-08-02", "resident_id": 2}])
 
 	history = get_prior_assignment_history(current_id, months=3)
 
-	assert set(history["period_id"].astype(int)) == {june_id, august_latest_id}
+	assert set(history["period_id"].astype(int)) == {june_id, august_id}
 	assert july_id not in set(history["period_id"].astype(int))
-	assert august_old_id not in set(history["period_id"].astype(int))
+	assert history.loc[history["work_date"] == "2026-06-05", "is_weekend"].iloc[0] == 1
 	assert history.loc[history["work_date"] == "2026-06-06", "is_weekend"].iloc[0] == 1
 	assert history.loc[history["work_date"] == "2026-06-08", "is_weekend"].iloc[0] == 0
+
+
+def test_workload_summary_counts_friday_as_weekend(isolated_db):
+	save_residents(
+		pd.DataFrame(
+			[
+				{"name": "Ada", "email": "ada@example.com", "max_shifts": 20, "min_shifts": None, "weight": 1.0, "active": 1},
+				{"name": "Ben", "email": "ben@example.com", "max_shifts": 20, "min_shifts": None, "weight": 1.0, "active": 1},
+			]
+		)
+	)
+	period_id = get_or_create_schedule_period(2026, 6, required_count=1)
+	save_assignments(
+		period_id,
+		[
+			{"work_date": "2026-06-05", "resident_id": 1},
+			{"work_date": "2026-06-08", "resident_id": 1},
+			{"work_date": "2026-06-06", "resident_id": 2},
+		],
+	)
+
+	summary = get_workload_summary(period_id)
+
+	assert int(summary.loc[summary["resident_name"] == "Ada", "weekend_shifts"].iloc[0]) == 1
+	assert int(summary.loc[summary["resident_name"] == "Ben", "weekend_shifts"].iloc[0]) == 1

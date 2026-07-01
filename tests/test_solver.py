@@ -7,7 +7,7 @@ import pytest
 
 from residency_scheduler.db import init_db
 from residency_scheduler.repository import (
-	create_schedule_period,
+	get_or_create_schedule_period,
 	get_assignments,
 	get_expanded_schedule_requests,
 	get_preference_violations,
@@ -63,7 +63,7 @@ def save_counted_assignments(period_id: int, year: int, month: int, resident_cou
 
 def test_normal_feasible_schedule_covers_every_day(isolated_db):
 	add_residents(["Ada", "Ben", "Cam", "Dee"], max_shifts=10)
-	period_id = create_schedule_period(2026, 1, "Draft 1", 1, None)
+	period_id = get_or_create_schedule_period(2026, 1, required_count=1)
 
 	result = solve_period(period_id, max_time_seconds=5)
 
@@ -74,7 +74,7 @@ def test_normal_feasible_schedule_covers_every_day(isolated_db):
 
 def test_date_range_vacation_is_honored(isolated_db):
 	add_residents(["Ada", "Ben", "Cam", "Dee"], max_shifts=10)
-	period_id = create_schedule_period(2026, 2, "Vacation draft", 1, None)
+	period_id = get_or_create_schedule_period(2026, 2, required_count=1)
 	replace_schedule_requests(
 		period_id,
 		pd.DataFrame(
@@ -101,7 +101,7 @@ def test_date_range_vacation_is_honored(isolated_db):
 
 def test_vacation_adds_prior_thursday_prefer_work(isolated_db):
 	add_residents(["Ada", "Ben", "Cam"], max_shifts=12)
-	period_id = create_schedule_period(2026, 2, "Vacation preference", 1, None)
+	period_id = get_or_create_schedule_period(2026, 2, required_count=1)
 	replace_schedule_requests(
 		period_id,
 		pd.DataFrame(
@@ -131,7 +131,7 @@ def test_vacation_adds_prior_thursday_prefer_work(isolated_db):
 
 def test_hard_assign_request_is_honored(isolated_db):
 	add_residents(["Ada", "Ben", "Cam", "Dee"], max_shifts=10)
-	period_id = create_schedule_period(2026, 3, "Assign draft", 1, None)
+	period_id = get_or_create_schedule_period(2026, 3, required_count=1)
 	replace_schedule_requests(
 		period_id,
 		pd.DataFrame(
@@ -156,7 +156,7 @@ def test_hard_assign_request_is_honored(isolated_db):
 
 def test_hard_assign_conflict_with_hard_unavailable_is_rejected(isolated_db):
 	add_residents(["Ada", "Ben", "Cam", "Dee"], max_shifts=10)
-	period_id = create_schedule_period(2026, 4, "Conflict draft", 1, None)
+	period_id = get_or_create_schedule_period(2026, 4, required_count=1)
 	replace_schedule_requests(
 		period_id,
 		pd.DataFrame(
@@ -189,7 +189,7 @@ def test_hard_assign_conflict_with_hard_unavailable_is_rejected(isolated_db):
 
 def test_too_many_hard_assign_requests_on_one_date_is_rejected(isolated_db):
 	add_residents(["Ada", "Ben", "Cam"], max_shifts=12)
-	period_id = create_schedule_period(2026, 5, "Overassigned draft", 1, None)
+	period_id = get_or_create_schedule_period(2026, 5, required_count=1)
 	replace_schedule_requests(
 		period_id,
 		pd.DataFrame(
@@ -208,7 +208,7 @@ def test_too_many_hard_assign_requests_on_one_date_is_rejected(isolated_db):
 
 def test_max_shifts_can_make_schedule_infeasible(isolated_db):
 	add_residents(["Ada", "Ben"], max_shifts=5)
-	period_id = create_schedule_period(2026, 6, "Max shift draft", 1, None)
+	period_id = get_or_create_schedule_period(2026, 6, required_count=1)
 
 	result = solve_period(period_id, max_time_seconds=5)
 
@@ -218,7 +218,7 @@ def test_max_shifts_can_make_schedule_infeasible(isolated_db):
 
 def test_preference_heavy_schedule_remains_feasible_and_reports_violations(isolated_db):
 	add_residents(["Ada", "Ben", "Cam"], max_shifts=12)
-	period_id = create_schedule_period(2026, 2, "Preference draft", 1, None)
+	period_id = get_or_create_schedule_period(2026, 2, required_count=1)
 	preferences = [
 		{
 			"resident": f"{name} · resident #{resident_id}",
@@ -242,7 +242,7 @@ def test_preference_heavy_schedule_remains_feasible_and_reports_violations(isola
 
 def test_back_to_back_is_avoided_when_enough_residents_exist(isolated_db):
 	add_residents([f"Resident {index}" for index in range(1, 32)], max_shifts=1)
-	period_id = create_schedule_period(2026, 7, "Back-to-back draft", 1, None)
+	period_id = get_or_create_schedule_period(2026, 7, required_count=1)
 
 	result = solve_period(period_id, max_time_seconds=10)
 
@@ -259,7 +259,7 @@ def test_total_shift_surplus_goes_to_lower_weight_residents(isolated_db):
 	high_weight = ["High 1", "High 2", "High 3"]
 	names = low_weight + high_weight
 	add_residents(names, max_shifts=10, weights={name: 1 for name in low_weight} | {name: 5 for name in high_weight})
-	period_id = create_schedule_period(2026, 1, "Weighted total draft", 1, None)
+	period_id = get_or_create_schedule_period(2026, 1, required_count=1)
 
 	result = solve_period(period_id, max_time_seconds=10)
 
@@ -276,25 +276,25 @@ def test_weekend_surplus_goes_to_lower_weight_residents(isolated_db):
 	high_weight = ["High 1", "High 2", "High 3"]
 	names = low_weight + high_weight
 	add_residents(names, max_shifts=10, weights={name: 1 for name in low_weight} | {name: 5 for name in high_weight})
-	period_id = create_schedule_period(2026, 8, "Weighted weekend draft", 1, None)
+	period_id = get_or_create_schedule_period(2026, 5, required_count=1)
 
 	result = solve_period(period_id, max_time_seconds=10)
 
 	assert result.status in {"OPTIMAL", "FEASIBLE"}
 	assignments = get_assignments(period_id)
-	weekend_assignments = assignments[pd.to_datetime(assignments["work_date"]).dt.weekday >= 5]
+	weekend_assignments = assignments[pd.to_datetime(assignments["work_date"]).dt.weekday >= 4]
 	weekend_counts = weekend_assignments.groupby("resident_name").size().to_dict()
 	for name in names:
 		weekend_counts.setdefault(name, 0)
 
-	assert sorted(weekend_counts.values()) == [1, 1, 1, 1, 2, 2, 2]
-	assert all(weekend_counts[name] == 1 for name in high_weight)
-	assert sum(weekend_counts[name] == 2 for name in low_weight) == 3
+	assert sorted(weekend_counts.values()) == [2, 2, 2, 2, 2, 2, 3]
+	assert all(weekend_counts[name] == 2 for name in high_weight)
+	assert sum(weekend_counts[name] == 3 for name in low_weight) == 1
 
 
 def test_seeded_random_tie_break_can_rotate_equal_cost_leftover_shift(isolated_db):
 	add_residents(["Ada", "Ben", "Cam", "Dee", "Eli"], max_shifts=10)
-	period_id = create_schedule_period(2026, 7, "Random leftover draft", 1, None)
+	period_id = get_or_create_schedule_period(2026, 7, required_count=1)
 	surplus_residents = set()
 
 	for seed in range(1, 9):
@@ -308,8 +308,8 @@ def test_seeded_random_tie_break_can_rotate_equal_cost_leftover_shift(isolated_d
 
 def test_prior_total_surplus_discourages_same_current_surplus_resident(isolated_db):
 	add_residents(["Ada", "Ben", "Cam", "Dee", "Eli"], max_shifts=10)
-	prior_id = create_schedule_period(2026, 5, "Prior total surplus draft", 1, None)
-	current_id = create_schedule_period(2026, 7, "Current total surplus draft", 1, None)
+	prior_id = get_or_create_schedule_period(2026, 5, required_count=1)
+	current_id = get_or_create_schedule_period(2026, 7, required_count=1)
 	save_counted_assignments(prior_id, 2026, 5, {1: 7, 2: 6, 3: 6, 4: 6, 5: 6})
 
 	result = solve_period(current_id, max_time_seconds=10, random_seed=1)
@@ -322,8 +322,8 @@ def test_prior_total_surplus_discourages_same_current_surplus_resident(isolated_
 
 def test_prior_weekend_surplus_discourages_same_current_weekend_surplus_resident(isolated_db):
 	add_residents(["Ada", "Ben", "Cam"], max_shifts=14)
-	prior_id = create_schedule_period(2026, 7, "Prior weekend surplus draft", 1, None)
-	current_id = create_schedule_period(2026, 8, "Current weekend surplus draft", 1, None)
+	prior_id = get_or_create_schedule_period(2026, 7, required_count=1)
+	current_id = get_or_create_schedule_period(2026, 8, required_count=1)
 	save_assignments(
 		prior_id,
 		[
@@ -365,15 +365,15 @@ def test_prior_weekend_surplus_discourages_same_current_weekend_surplus_resident
 
 	assert result.status in {"OPTIMAL", "FEASIBLE"}
 	assignments = get_assignments(current_id)
-	weekend_assignments = assignments[pd.to_datetime(assignments["work_date"]).dt.weekday >= 5]
+	weekend_assignments = assignments[pd.to_datetime(assignments["work_date"]).dt.weekday >= 4]
 	weekend_counts = weekend_assignments.groupby("resident_id").size().to_dict()
-	assert weekend_counts[1] == 3
-	assert sorted(weekend_counts.values()) == [3, 3, 4]
+	assert weekend_counts[1] == 4
+	assert sorted(weekend_counts.values()) == [4, 5, 5]
 
 
 def test_exactly_two_fridays_weekday_count_rule_is_enforced(isolated_db):
 	add_residents(["Ada", "Ben", "Cam", "Dee"], max_shifts=12)
-	period_id = create_schedule_period(2026, 7, "Friday rule draft", 1, None)
+	period_id = get_or_create_schedule_period(2026, 7, required_count=1)
 	replace_schedule_rules(
 		period_id,
 		pd.DataFrame(
@@ -401,7 +401,7 @@ def test_exactly_two_fridays_weekday_count_rule_is_enforced(isolated_db):
 
 def test_city_hope_friday_saturday_pair_rule_is_enforced(isolated_db):
 	add_residents(["City Hope", "Ben", "Cam", "Dee"], max_shifts=12)
-	period_id = create_schedule_period(2026, 7, "City Hope pair draft", 1, None)
+	period_id = get_or_create_schedule_period(2026, 7, required_count=1)
 	replace_schedule_rules(
 		period_id,
 		pd.DataFrame(
@@ -436,7 +436,7 @@ def test_city_hope_friday_saturday_pair_rule_is_enforced(isolated_db):
 
 def test_city_hope_pair_rule_blocks_extra_unpaired_fridays_or_saturdays(isolated_db):
 	add_residents(["City Hope", "Ben", "Cam", "Dee"], max_shifts=12)
-	period_id = create_schedule_period(2026, 8, "City Hope no partial pair draft", 1, None)
+	period_id = get_or_create_schedule_period(2026, 8, required_count=1)
 	replace_schedule_rules(
 		period_id,
 		pd.DataFrame(
@@ -465,9 +465,159 @@ def test_city_hope_pair_rule_blocks_extra_unpaired_fridays_or_saturdays(isolated
 	assert int((city_hope_dates.dt.weekday == 5).sum()) == 1
 
 
+def test_away_rotation_with_pair_rule_assigns_only_that_pair(isolated_db):
+	add_residents(["City Hope", "Ben", "Cam", "Dee"], max_shifts=20)
+	period_id = get_or_create_schedule_period(2026, 8, required_count=1)
+	replace_schedule_rules(
+		period_id,
+		pd.DataFrame(
+			[
+				{
+					"resident": "City Hope · resident #1",
+					"rule_type": "away_rotation",
+					"priority": "hard",
+					"reason": "Away rotation",
+				},
+				{
+					"resident": "City Hope · resident #1",
+					"rule_type": "weekday_pair_count",
+					"weekday": "Friday",
+					"paired_weekday": "Saturday",
+					"comparator": "exactly",
+					"target_count": 1,
+					"priority": "hard",
+					"reason": "Required weekend pair",
+				},
+			]
+		),
+	)
+
+	result = solve_period(period_id, max_time_seconds=10)
+
+	assert result.status in {"OPTIMAL", "FEASIBLE"}
+	assignments = get_assignments(period_id)
+	city_hope = assignments[assignments["resident_id"] == 1].copy()
+	city_hope_dates = pd.to_datetime(city_hope["work_date"])
+	assert len(city_hope) == 2
+	assert int((city_hope_dates.dt.weekday == 4).sum()) == 1
+	assert int((city_hope_dates.dt.weekday == 5).sum()) == 1
+	assert city_hope_dates.min() + pd.Timedelta(days=1) == city_hope_dates.max()
+
+
+def test_away_rotation_alone_blocks_resident_when_feasible(isolated_db):
+	add_residents(["Ada", "Ben", "Cam"], max_shifts=31)
+	period_id = get_or_create_schedule_period(2026, 5, required_count=1)
+	replace_schedule_rules(
+		period_id,
+		pd.DataFrame(
+			[
+				{
+					"resident": "Ada · resident #1",
+					"rule_type": "away_rotation",
+					"priority": "hard",
+					"reason": "Away rotation",
+				}
+			]
+		),
+	)
+
+	result = solve_period(period_id, max_time_seconds=10)
+
+	assert result.status in {"OPTIMAL", "FEASIBLE"}
+	assignments = get_assignments(period_id)
+	assert 1 not in set(assignments["resident_id"].astype(int))
+
+
+def test_away_rotation_allows_hard_assign_request_only(isolated_db):
+	add_residents(["Ada", "Ben", "Cam"], max_shifts=31)
+	period_id = get_or_create_schedule_period(2026, 5, required_count=1)
+	replace_schedule_rules(
+		period_id,
+		pd.DataFrame(
+			[
+				{
+					"resident": "Ada · resident #1",
+					"rule_type": "away_rotation",
+					"priority": "hard",
+					"reason": "Away rotation",
+				}
+			]
+		),
+	)
+	replace_schedule_requests(
+		period_id,
+		pd.DataFrame(
+			[
+				{
+					"resident": "Ada · resident #1",
+					"start_date": "2026-05-12",
+					"end_date": "2026-05-12",
+					"request_type": "assign",
+					"priority": "hard",
+					"reason": "Required coverage",
+				}
+			]
+		),
+	)
+
+	result = solve_period(period_id, max_time_seconds=10)
+
+	assert result.status in {"OPTIMAL", "FEASIBLE"}
+	assignments = get_assignments(period_id)
+	ada_assignments = assignments[assignments["resident_id"] == 1]
+	assert ada_assignments["work_date"].tolist() == ["2026-05-12"]
+
+
+def test_soft_away_rotation_avoids_resident_but_remains_feasible(isolated_db):
+	add_residents(["Ada", "Ben", "Cam"], max_shifts=31)
+	period_id = get_or_create_schedule_period(2026, 5, required_count=1)
+	replace_schedule_rules(
+		period_id,
+		pd.DataFrame(
+			[
+				{
+					"resident": "Ada · resident #1",
+					"rule_type": "away_rotation",
+					"priority": "soft",
+					"reason": "Away rotation if possible",
+				}
+			]
+		),
+	)
+
+	result = solve_period(period_id, max_time_seconds=10)
+
+	assert result.status in {"OPTIMAL", "FEASIBLE"}
+	assignments = get_assignments(period_id)
+	assert 1 not in set(assignments["resident_id"].astype(int))
+
+
+def test_away_rotation_can_make_period_invalid_when_too_few_residents_remain(isolated_db):
+	add_residents(["Ada", "Ben"], max_shifts=31)
+	period_id = get_or_create_schedule_period(2026, 5, required_count=2)
+	replace_schedule_rules(
+		period_id,
+		pd.DataFrame(
+			[
+				{
+					"resident": "Ada · resident #1",
+					"rule_type": "away_rotation",
+					"priority": "hard",
+					"reason": "Away rotation",
+				}
+			]
+		),
+	)
+
+	result = solve_period(period_id, max_time_seconds=10)
+
+	assert result.status == "INVALID_INPUT"
+	assert any("available resident" in warning for warning in result.warnings)
+
+
 def test_pair_rule_impossible_target_is_invalid_input(isolated_db):
 	add_residents(["City Hope", "Ben", "Cam", "Dee"], max_shifts=20)
-	period_id = create_schedule_period(2026, 7, "Impossible pair draft", 1, None)
+	period_id = get_or_create_schedule_period(2026, 7, required_count=1)
 	replace_schedule_rules(
 		period_id,
 		pd.DataFrame(

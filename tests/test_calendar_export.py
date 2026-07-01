@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-from io import BytesIO
-from zipfile import ZipFile
-
 import pandas as pd
 
-from residency_scheduler.calendar.ical import build_fullcalendar_events, build_ical_calendar, build_pgy_ical_zip
+from residency_scheduler.calendar.ical import build_fullcalendar_events, build_ical_calendar
 
 
 def assignment_rows() -> pd.DataFrame:
@@ -64,42 +61,7 @@ def test_ical_export_contains_stable_event_and_escaped_text():
 	assert content.endswith("END:VCALENDAR\r\n")
 
 
-def test_ical_export_includes_calendar_name_when_provided():
-	content = build_ical_calendar(assignment_rows(), calendar_name="2026-08-PGY3").decode("utf-8")
+def test_ical_export_includes_call_schedule_calendar_name_when_provided():
+	content = build_ical_calendar(assignment_rows(), calendar_name="2026-08-call-schedule").decode("utf-8")
 
-	assert "X-WR-CALNAME:2026-08-PGY3\r\n" in content
-
-
-def test_pgy_ical_zip_groups_assignments_by_pgy():
-	rows = pd.concat(
-		[
-			assignment_rows(),
-			pd.DataFrame(
-				[
-					{
-						"id": 43,
-						"period_id": 1,
-						"work_date": "2026-08-16",
-						"resident_id": 8,
-						"resident_name": "Ben",
-						"resident_color": "#2563EB",
-						"resident_pgy": 4,
-						"source": "solver",
-						"is_locked": 0,
-						"google_event_id": None,
-					}
-				]
-			),
-		],
-		ignore_index=True,
-	)
-
-	with ZipFile(BytesIO(build_pgy_ical_zip(rows, 2026, 8))) as archive:
-		assert sorted(archive.namelist()) == ["2026-08-PGY3.ics", "2026-08-PGY4.ics"]
-		pgy3 = archive.read("2026-08-PGY3.ics").decode("utf-8")
-		pgy4 = archive.read("2026-08-PGY4.ics").decode("utf-8")
-
-	assert "X-WR-CALNAME:2026-08-PGY3\r\n" in pgy3
-	assert "UID:residency-scheduler-assignment-42@local\r\n" in pgy3
-	assert "X-WR-CALNAME:2026-08-PGY4\r\n" in pgy4
-	assert "UID:residency-scheduler-assignment-43@local\r\n" in pgy4
+	assert "X-WR-CALNAME:2026-08-call-schedule\r\n" in content

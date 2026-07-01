@@ -91,7 +91,7 @@ Status: complete.
 - Unlocked assignments can be manually reassigned.
 - Manual edits validate hard constraints before saving.
 - Manual edits can optionally create hard assign requests.
-- Generate page exports assignments as a PGY-grouped ICS ZIP for manual calendar import.
+- Generate page exports assignments as a single call-schedule ICS file for manual calendar import.
 
 ### Calendar Publishing
 

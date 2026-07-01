@@ -78,6 +78,7 @@ def build_ical_calendar(assignments: pd.DataFrame, time_zone: str = DEFAULT_TIME
 
 
 def build_pgy_ical_zip(assignments: pd.DataFrame, year: int, month: int, time_zone: str = DEFAULT_TIME_ZONE) -> bytes:
+	"""Deprecated: retained for compatibility with older PGY-grouped export tests."""
 	buffer = BytesIO()
 	with ZipFile(buffer, "w", compression=ZIP_DEFLATED) as archive:
 		pgy_levels = [] if assignments.empty else sorted(assignments["resident_pgy"].dropna().astype(int).unique().tolist())

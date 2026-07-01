@@ -16,6 +16,8 @@ REQUEST_TYPES = HARD_UNAVAILABLE_TYPES | {"prefer_off", "prefer_work", "assign"}
 HARD_DEFAULT_REQUEST_TYPES = HARD_UNAVAILABLE_TYPES | {"assign"}
 SOFT_DEFAULT_REQUEST_TYPES = {"prefer_off", "prefer_work"}
 PRIORITIES = {"hard", "soft"}
+SCHEDULE_RULE_TYPES = {"weekday_count", "weekday_pair_count", "away_rotation"}
+WEEKEND_WEEKDAYS = {4, 5, 6}
 WEEKDAYS = {
 	"Monday": 0,
 	"Tuesday": 1,
@@ -28,9 +30,16 @@ WEEKDAYS = {
 WEEKDAY_NAMES = {value: key for key, value in WEEKDAYS.items()}
 
 
+def is_weekend_weekday(weekday: int) -> bool:
+	return int(weekday) in WEEKEND_WEEKDAYS
+
+
 def read_sql(query: str, params: tuple = ()) -> pd.DataFrame:
 	with get_connection() as conn:
-		return pd.read_sql_query(query, conn, params=params)
+		cursor = conn.execute(query, params)
+		rows = cursor.fetchall()
+		columns = [column[0] for column in cursor._cursor.description or []]
+		return pd.DataFrame(rows, columns=columns)
 
 
 def get_app_state(key: str) -> str | None:
@@ -79,7 +88,7 @@ def get_schedule_periods(year: int | None = None, month: int | None = None) -> p
 		params = (year, month)
 	return read_sql(
 		f"""
-		SELECT id, year, month, draft_name, required_count, status, google_calendar_id, created_at
+		SELECT id, year, month, required_count, google_calendar_id, created_at
 		FROM schedule_periods
 		{where}
 		ORDER BY year DESC, month DESC, id DESC
@@ -88,12 +97,11 @@ def get_schedule_periods(year: int | None = None, month: int | None = None) -> p
 	)
 
 
-def create_schedule_period(
+def get_or_create_schedule_period(
 	year: int,
 	month: int,
-	draft_name: str,
-	required_count: int,
-	google_calendar_id: str | None,
+	required_count: int = 1,
+	google_calendar_id: str | None = None,
 ) -> int:
 	if month < 1 or month > 12:
 		raise ValueError("Month must be between 1 and 12.")
@@ -101,40 +109,33 @@ def create_schedule_period(
 		raise ValueError("Year must be between 2024 and 2100.")
 	if required_count < 1:
 		raise ValueError("Residents per night must be at least 1.")
-	draft_name = draft_name.strip() or "Draft 1"
 
 	with get_connection() as conn:
 		cursor = conn.execute(
 			"""
-			INSERT INTO schedule_periods (year, month, draft_name, required_count, google_calendar_id)
-			VALUES (?, ?, ?, ?, ?)
+			INSERT INTO schedule_periods (year, month, required_count, google_calendar_id)
+			VALUES (?, ?, ?, ?)
+			ON CONFLICT(year, month) DO UPDATE SET
+				required_count = schedule_periods.required_count
 			RETURNING id
 			""",
-			(year, month, draft_name, required_count, google_calendar_id),
+			(year, month, required_count, google_calendar_id),
 		)
-		return int(cursor.fetchone()[0])
+		return int(cursor.fetchone()["id"])
 
 
-def rename_schedule_period(period_id: int, draft_name: str) -> None:
-	draft_name = draft_name.strip()
-	if not draft_name:
-		raise ValueError("Draft name is required.")
+def update_schedule_period_settings(period_id: int, required_count: int, google_calendar_id: str | None = None) -> None:
+	if required_count < 1:
+		raise ValueError("Residents per night must be at least 1.")
 	with get_connection() as conn:
 		cursor = conn.execute(
 			"""
 			UPDATE schedule_periods
-			SET draft_name = ?
+			SET required_count = ?, google_calendar_id = ?
 			WHERE id = ?
 			""",
-			(draft_name, int(period_id)),
+			(int(required_count), google_calendar_id, int(period_id)),
 		)
-		if cursor.rowcount == 0:
-			raise ValueError(f"Schedule period #{period_id} was not found.")
-
-
-def delete_schedule_period(period_id: int) -> None:
-	with get_connection() as conn:
-		cursor = conn.execute("DELETE FROM schedule_periods WHERE id = ?", (int(period_id),))
 		if cursor.rowcount == 0:
 			raise ValueError(f"Schedule period #{period_id} was not found.")
 
@@ -213,10 +214,11 @@ def save_residents(df: pd.DataFrame) -> None:
 					"""
 					INSERT INTO residents (name, email, max_shifts, min_shifts, weight, color, active)
 					VALUES (?, ?, ?, ?, ?, ?, ?)
+					RETURNING id
 					""",
 					(row.name, row.email, max_shifts, min_shifts, int(row.weight), color or None, int(row.active)),
 				)
-				new_resident_id = int(cursor.lastrowid)
+				new_resident_id = int(cursor.fetchone()["id"])
 				if not color:
 					color = _next_resident_color(used_colors, new_resident_id)
 					conn.execute("UPDATE residents SET color = ? WHERE id = ?", (color, new_resident_id))
@@ -312,7 +314,7 @@ def replace_schedule_requests(period_id: int, df: pd.DataFrame) -> None:
 			raise ValueError(f"Invalid priority '{row.priority}'.")
 		for work_date in _date_range(start, end):
 			if work_date.isoformat() not in valid_dates:
-				raise ValueError(f"Request date {work_date.isoformat()} is outside the selected draft month.")
+				raise ValueError(f"Request date {work_date.isoformat()} is outside the selected month.")
 		rows.append((period_id, resident_id, start.isoformat(), end.isoformat(), request_type, priority, row.reason or ""))
 
 	with get_connection() as conn:
@@ -414,16 +416,16 @@ def replace_schedule_rules(period_id: int, df: pd.DataFrame) -> None:
 	for row in clean.itertuples(index=False):
 		resident_id = _resolve_resident_id(row, resident_options)
 		rule_type = str(row.rule_type or "weekday_count").strip().lower()
-		if rule_type not in {"weekday_count", "weekday_pair_count"}:
-			raise ValueError("Only weekday_count and weekday_pair_count rules are supported.")
-		weekday = _coerce_weekday(row.weekday)
+		if rule_type not in SCHEDULE_RULE_TYPES:
+			raise ValueError("Only weekday_count, weekday_pair_count, and away_rotation rules are supported.")
+		weekday = 0 if rule_type == "away_rotation" else _coerce_weekday(row.weekday)
 		paired_weekday = None
 		if rule_type == "weekday_pair_count":
 			paired_weekday = _coerce_weekday(row.paired_weekday)
-		comparator = str(row.comparator or "exactly").strip().lower()
-		if comparator != "exactly":
+		comparator = "exactly" if rule_type == "away_rotation" else str(row.comparator or "exactly").strip().lower()
+		if rule_type != "away_rotation" and comparator != "exactly":
 			raise ValueError("Only exactly rules are supported.")
-		target_count = int(pd.to_numeric(row.target_count, errors="raise"))
+		target_count = 0 if rule_type == "away_rotation" else int(pd.to_numeric(row.target_count, errors="raise"))
 		if target_count < 0:
 			raise ValueError("Rule target count cannot be negative.")
 		priority = str(row.priority or "hard").strip().lower()
@@ -442,6 +444,70 @@ def replace_schedule_rules(period_id: int, df: pd.DataFrame) -> None:
 			""",
 			rows,
 		)
+
+
+def create_schedule_rule(
+	period_id: int,
+	resident_id: int,
+	rule_type: str,
+	weekday: int | None = None,
+	paired_weekday: int | None = None,
+	target_count: int | None = None,
+	priority: str = "hard",
+	reason: str = "",
+) -> None:
+	rule_type = str(rule_type or "").strip().lower()
+	if rule_type not in SCHEDULE_RULE_TYPES:
+		raise ValueError("Only weekday_count, weekday_pair_count, and away_rotation rules are supported.")
+	priority = str(priority or "hard").strip().lower()
+	if priority not in PRIORITIES:
+		raise ValueError(f"Invalid priority '{priority}'.")
+
+	if rule_type == "away_rotation":
+		weekday_value = 0
+		paired_weekday_value = None
+		target_count_value = 0
+	else:
+		if weekday is None:
+			raise ValueError("Weekday is required.")
+		weekday_value = int(weekday)
+		if weekday_value < 0 or weekday_value > 6:
+			raise ValueError("Weekday must be between 0 and 6.")
+		target_count_value = int(target_count if target_count is not None else 0)
+		if target_count_value < 0:
+			raise ValueError("Rule target count cannot be negative.")
+		paired_weekday_value = None
+		if rule_type == "weekday_pair_count":
+			if paired_weekday is None:
+				raise ValueError("Paired weekday is required.")
+			paired_weekday_value = int(paired_weekday)
+			if paired_weekday_value < 0 or paired_weekday_value > 6:
+				raise ValueError("Paired weekday must be between 0 and 6.")
+
+	with get_connection() as conn:
+		conn.execute(
+			"""
+			INSERT INTO schedule_rules (
+				period_id, resident_id, rule_type, weekday, paired_weekday, comparator, target_count, priority, reason
+			)
+			VALUES (?, ?, ?, ?, ?, 'exactly', ?, ?, ?)
+			""",
+			(
+				int(period_id),
+				int(resident_id),
+				rule_type,
+				weekday_value,
+				paired_weekday_value,
+				target_count_value,
+				priority,
+				str(reason or ""),
+			),
+		)
+
+
+def delete_schedule_rule(rule_id: int, period_id: int) -> None:
+	with get_connection() as conn:
+		conn.execute("DELETE FROM schedule_rules WHERE id = ? AND period_id = ?", (int(rule_id), int(period_id)))
 
 
 def get_assignments(period_id: int) -> pd.DataFrame:
@@ -486,7 +552,6 @@ def get_prior_assignment_history(period_id: int, months: int = 3) -> pd.DataFram
 						FROM assignments a
 						WHERE a.period_id = sp.id
 					)
-				ORDER BY sp.id DESC
 				LIMIT 1
 				""",
 				(cursor_month.year, cursor_month.month),
@@ -500,11 +565,7 @@ def get_prior_assignment_history(period_id: int, months: int = 3) -> pd.DataFram
 	placeholders = ",".join("?" for _ in selected_period_ids)
 	history = read_sql(
 		f"""
-		SELECT sp.id AS period_id, sp.year, sp.month, a.resident_id, a.work_date,
-			CASE
-				WHEN CAST(strftime('%w', a.work_date) AS INTEGER) IN (0, 6) THEN 1
-				ELSE 0
-			END AS is_weekend
+		SELECT sp.id AS period_id, sp.year, sp.month, a.resident_id, a.work_date
 		FROM schedule_periods sp
 		JOIN assignments a ON a.period_id = sp.id
 		WHERE sp.id IN ({placeholders})
@@ -512,6 +573,8 @@ def get_prior_assignment_history(period_id: int, months: int = 3) -> pd.DataFram
 		""",
 		tuple(selected_period_ids),
 	)
+	if not history.empty:
+		history["is_weekend"] = pd.to_datetime(history["work_date"]).dt.weekday.isin(WEEKEND_WEEKDAYS).astype(int)
 	return history[columns]
 
 
@@ -620,7 +683,7 @@ def swap_assignment_residents(
 	if first is None or second is None:
 		raise ValueError("Both assignments must exist before they can be swapped.")
 	if int(first["period_id"]) != int(second["period_id"]):
-		raise ValueError("Assignments must belong to the same draft.")
+		raise ValueError("Assignments must belong to the same schedule month.")
 	if int(first["is_locked"]) == 1 or int(second["is_locked"]) == 1:
 		raise ValueError("Hard assigned shifts cannot be swapped.")
 	if int(first["resident_id"]) == int(second["resident_id"]):
@@ -682,15 +745,33 @@ def update_assignment_google_event_id(assignment_id: int, google_event_id: str) 
 		)
 
 
-def get_schedule_runs(period_id: int) -> pd.DataFrame:
+def clear_assignment_google_event_ids(period_id: int) -> None:
+	with get_connection() as conn:
+		conn.execute(
+			"""
+			UPDATE assignments
+			SET google_event_id = NULL, updated_at = CURRENT_TIMESTAMP
+			WHERE period_id = ?
+			""",
+			(period_id,),
+		)
+
+
+def get_schedule_runs(period_id: int, limit: int | None = None) -> pd.DataFrame:
+	limit_clause = ""
+	params: list[object] = [period_id]
+	if limit is not None:
+		limit_clause = "LIMIT ?"
+		params.append(int(limit))
 	return read_sql(
-		"""
+		f"""
 		SELECT id, period_id, run_at, solver_status, objective_score, warnings_json
 		FROM schedule_runs
 		WHERE period_id = ?
 		ORDER BY run_at DESC, id DESC
+		{limit_clause}
 		""",
-		(period_id,),
+		tuple(params),
 	)
 
 
@@ -711,7 +792,7 @@ def get_workload_summary(period_id: int) -> pd.DataFrame:
 		return pd.DataFrame(columns=["resident_name", "total_shifts", "weekend_shifts", "hard_assigned_shifts", "manual_shifts"])
 
 	work_dates = pd.to_datetime(assignments["work_date"])
-	assignments = assignments.assign(is_weekend=work_dates.dt.weekday >= 5)
+	assignments = assignments.assign(is_weekend=work_dates.dt.weekday.isin(WEEKEND_WEEKDAYS))
 	return (
 		assignments.groupby("resident_name")
 		.agg(
@@ -851,7 +932,7 @@ def _validate_manual_assignment(
 
 	valid_dates = set(period_dates(period_id))
 	if work_date not in valid_dates:
-		raise ValueError("Assignment date is outside the selected draft month.")
+		raise ValueError("Assignment date is outside the selected month.")
 	if resident_id not in set(get_residents(active_only=True)["id"].astype(int).tolist()):
 		raise ValueError("Selected resident is not active.")
 
