@@ -34,7 +34,7 @@ OAUTH_STATE_KEY = "google_oauth_state"
 AUTH_COOKIE_NAME = "rs_google_auth"
 PENDING_REMEMBER_COOKIE_KEY = "pending_google_remember_cookie"
 EXPIRY_REFRESH_WINDOW = timedelta(minutes=5)
-OAUTH_STATE_TTL = timedelta(minutes=15)
+OAUTH_STATE_TTL = timedelta(hours=1)
 REMEMBER_SESSION_TTL = timedelta(days=30)
 
 
@@ -59,15 +59,17 @@ class GoogleOAuthConfig:
 		}
 
 
-def require_google_auth() -> dict[str, Any]:
+def require_google_auth(render_sidebar: bool = True) -> dict[str, Any]:
 	"""Require a valid Google sign-in before rendering app content."""
 	session = st.session_state.get(AUTH_SESSION_KEY)
 	if _session_auth_is_valid(session):
-		_render_signed_in_sidebar(session)
+		if render_sidebar:
+			_render_signed_in_sidebar(session)
 		return session
 
 	if session and _refresh_session_if_possible(session):
-		_render_signed_in_sidebar(st.session_state[AUTH_SESSION_KEY])
+		if render_sidebar:
+			_render_signed_in_sidebar(st.session_state[AUTH_SESSION_KEY])
 		return st.session_state[AUTH_SESSION_KEY]
 
 	config = load_google_oauth_config()
@@ -75,7 +77,8 @@ def require_google_auth() -> dict[str, Any]:
 		remembered_session = _restore_session_from_cookie(config)
 		if remembered_session is not None:
 			st.session_state[AUTH_SESSION_KEY] = remembered_session
-			_render_signed_in_sidebar(remembered_session)
+			if render_sidebar:
+				_render_signed_in_sidebar(remembered_session)
 			return remembered_session
 
 	_hide_unauthenticated_navigation()
@@ -252,7 +255,8 @@ def persist_authenticated_user(
 def _handle_oauth_callback(code: str, state: str | None, config: GoogleOAuthConfig) -> None:
 	expected_state = st.session_state.get(OAUTH_STATE_KEY)
 	if not _oauth_state_matches(state, expected_state, config):
-		st.error("Google sign-in state did not match. Please try again.")
+		_clear_auth_query_params()
+		st.error("Google sign-in expired or could not be verified. Please try again.")
 		st.stop()
 
 	flow = _oauth_flow(config, state=state, scopes=_scopes_from_oauth_state(state) or GOOGLE_REQUIRED_SCOPES)

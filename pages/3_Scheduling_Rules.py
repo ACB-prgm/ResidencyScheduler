@@ -17,9 +17,7 @@ from residency_scheduler.repository import (
 	delete_schedule_rule,
 	get_schedule_rules,
 )
-from residency_scheduler.ui import flash_success, render_page_header
-
-st.set_page_config(page_title="Scheduling Rules", layout="wide")
+from residency_scheduler.ui import flash_success, render_page_header, render_user_guide
 
 RULE_TYPE_LABELS = {
 	"weekday_count": "Weekday count",
@@ -52,6 +50,19 @@ period_id = render_page_header(
 	"Scheduling Rules",
 	"Add month-specific scheduling rules. New rules default to hard priority.",
 	month_location="rules",
+)
+render_user_guide(
+	"Scheduling Rules",
+	"""
+	Use this page for month-specific rules that go beyond simple availability.
+
+	- **Weekday count:** requires a resident to work exactly the target number of a selected weekday.
+	- **Weekday pair count:** requires adjacent paired weekdays, such as one Friday+Saturday pair.
+	- **Away rotation:** keeps a resident off ordinary call assignments for the month unless another hard assign/rule explicitly requires dates.
+	- **Priority:** hard rules must be honored; soft rules influence the solver score but can be missed if needed.
+
+	Example: for an away rotation with required City of Hope weekend coverage, add an Away rotation rule plus a Weekday pair count rule for Friday and Saturday with target count 1. Keep rules hard unless the solver may miss the target when needed.
+	""",
 )
 residents = get_cached_residents(active_only=True)
 
@@ -127,12 +138,3 @@ with rules_col:
 					clear_month_data_cache()
 					flash_success("Scheduling rule deleted.")
 					st.rerun()
-
-with st.expander("Rule examples"):
-	st.markdown(
-		"""
-		- For an away rotation with required City of Hope weekend coverage, add an Away rotation rule plus a Weekday pair count rule for Friday and Saturday with target count 1.
-		- Use Weekday count when a resident must work exactly N selected weekdays.
-		- Keep rules hard unless the solver may miss the target when needed.
-		"""
-	)

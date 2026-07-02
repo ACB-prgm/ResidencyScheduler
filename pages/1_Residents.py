@@ -8,10 +8,7 @@ from residency_scheduler.auth import require_google_auth
 from residency_scheduler.colors import RESIDENT_COLOR_PALETTE
 from residency_scheduler.cache import clear_all_data_caches, ensure_database_initialized, get_cached_residents, preload_reference_data
 from residency_scheduler.repository import save_residents
-from residency_scheduler.ui import flash_error, flash_success, render_page_header
-
-st.set_page_config(page_title="Residents", layout="wide")
-
+from residency_scheduler.ui import flash_error, flash_success, render_page_header, render_user_guide
 
 def color_swatch_data_uri(color: str | None) -> str:
 	if not color:
@@ -52,6 +49,21 @@ ensure_database_initialized()
 preload_reference_data()
 
 render_page_header("Residents", "Maintain the active resident roster used by the scheduler.")
+render_user_guide(
+	"Residents",
+	"""
+	Use this page to maintain the roster that the scheduler can assign.
+
+	- **Name:** the resident name shown in dropdowns, schedules, and calendar events.
+	- **PGY:** postgraduate year level from 1 through 5. Higher PGY levels are protected from surplus total and weekend shifts when feasible.
+	- **Min/Max:** optional monthly shift bounds. Min asks the solver to reach at least that many shifts; Max prevents assignments above the limit.
+	- **Email:** optional contact reference.
+	- **Color/Swatch:** the color used for that resident in the schedule calendar. Colors must be unique.
+	- **Active:** inactive residents are kept for history but are not used for new schedules.
+
+	Removing a resident row marks that resident inactive instead of deleting historical schedule data. Use **Save residents** after roster changes.
+	""",
+)
 
 existing = get_cached_residents(active_only=False)
 active_existing = existing[existing["active"].astype(int) == 1] if not existing.empty else existing
@@ -120,5 +132,3 @@ if st.button("Save residents", type="primary"):
 		clear_all_data_caches()
 		flash_success("Residents saved.")
 	st.rerun()
-
-st.info("Removing a resident row marks that resident inactive instead of deleting historical schedule data.")

@@ -35,6 +35,12 @@ def render_page_header(title: str, caption: str, month_location: str | None = No
 	return None
 
 
+def render_user_guide(page_name: str, body: str, expanded: bool = False) -> None:
+	"""Render the page-level help section with a consistent label."""
+	with st.expander(f"User Guide: {page_name}", expanded=expanded):
+		st.markdown(body)
+
+
 def select_month(location: str = "global") -> tuple[int, int]:
 	months = get_cached_calendar_months()
 	if months.empty:

@@ -30,9 +30,7 @@ from residency_scheduler.repository import (
 	update_schedule_period_settings,
 )
 from residency_scheduler.solver import solve_period
-from residency_scheduler.ui import flash_error, flash_success, flash_warning, render_page_header
-
-st.set_page_config(page_title="Generate Schedule", layout="wide")
+from residency_scheduler.ui import flash_error, flash_success, flash_warning, render_page_header, render_user_guide
 
 GOOGLE_PUBLISH_IN_PROGRESS_KEY = "google_publish_in_progress"
 GOOGLE_PUBLISH_LAST_KEY = "google_publish_last_signature"
@@ -121,6 +119,21 @@ period_id = render_page_header(
 	"Generate Schedule",
 	"Run, review, edit, and export the selected month.",
 	month_location="generate",
+)
+render_user_guide(
+	"Generate Schedule",
+	"""
+	Use this page to generate, review, adjust, and publish the selected month.
+
+	- **Run scheduler:** creates assignments for the month using active residents, availability, preferences, scheduling rules, and rolling fairness from prior months.
+	- **Calendar:** shows the generated schedule by date.
+	- **Workload summary:** shows total shifts, weekend shifts, hard assigned shifts, and manual shifts by resident.
+	- **Preference violations:** lists soft prefer-off entries that could not be honored.
+	- **Edit Assignment:** lets you manually reassign one unlocked assignment or swap residents between two unlocked assignments.
+	- **Google Calendar publishing:** writes the current schedule to a selected writable Google Calendar after deleting only prior Residency Scheduler events for the same month and calendar.
+	- **ICS export:** downloads a single call-schedule calendar file.
+	- **Developer details:** shows recent solver run diagnostics for troubleshooting.
+	""",
 )
 month_context = get_cached_month_context(period_id)
 period = month_context["period"]

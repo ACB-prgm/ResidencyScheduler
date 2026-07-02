@@ -4,7 +4,7 @@
 
 Use the Year-Month selector at the top of any page to choose the month you are editing. The selected month is global, so changing it on one page updates the active month everywhere.
 
-Each year-month has one schedule. Requests, scheduling rules, generated assignments, manual edits, and calendar publishing settings all belong to the selected month.
+Each year-month has one schedule. Availability, preferences, scheduling rules, generated assignments, manual edits, and calendar publishing settings all belong to the selected month.
 
 ## Residents
 
@@ -17,15 +17,15 @@ Residents are the people eligible for call scheduling.
 
 ## Availability and Preferences
 
-Availability and Preferences are date-based requests. A request can cover one date or a date range.
+Availability and Preferences are date-based entries. An entry can cover one date or a date range.
 
 - `vacation`, `unavailable`, `approved_absence`, and `medical_leave` default to hard.
 - `assign` defaults to hard and forces the resident onto the selected date.
 - `prefer_off` and `prefer_work` default to soft.
-- Hard requests must be honored by the solver.
-- Soft requests affect the solver objective but can be violated if needed.
+- Hard availability and preferences must be honored by the solver.
+- Soft availability and preferences affect the solver objective but can be violated if needed.
 
-Vacation ranges automatically add a soft `prefer_work` request for the Thursday before vacation starts when that Thursday is inside the selected month.
+Vacation ranges automatically add a soft `prefer_work` preference for the Thursday before vacation starts when that Thursday is inside the selected month.
 
 ## Scheduling Rules
 

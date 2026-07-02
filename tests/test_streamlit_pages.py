@@ -9,7 +9,7 @@ from streamlit.testing.v1 import AppTest
 
 from residency_scheduler.auth import AUTH_SESSION_KEY, GOOGLE_CALENDAR_SCOPES
 from residency_scheduler.db import init_db
-from residency_scheduler.repository import get_or_create_schedule_period, save_residents
+from residency_scheduler.repository import get_or_create_schedule_period, get_schedule_requests_for_editor, save_residents
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -49,6 +49,7 @@ def authenticated_session() -> dict:
 	"script_path",
 	[
 		"app.py",
+		"pages/0_Home.py",
 		"pages/1_Residents.py",
 		"pages/2_Availability_and_Preferences.py",
 		"pages/3_Scheduling_Rules.py",
@@ -88,7 +89,51 @@ def test_home_defaults_to_current_year_month(isolated_db):
 	app.run(timeout=5)
 
 	assert not app.exception
+	assert app.title[0].value == "Residency Call Scheduler"
 	assert app.selectbox[0].value.startswith(f"{date.today().year}-{date.today().month:02d}")
+
+
+@pytest.mark.parametrize(
+	("script_path", "guide_label"),
+	[
+		("app.py", "User Guide: Home"),
+		("pages/0_Home.py", "User Guide: Home"),
+		("pages/1_Residents.py", "User Guide: Residents"),
+		("pages/2_Availability_and_Preferences.py", "User Guide: Availability and Preferences"),
+		("pages/3_Scheduling_Rules.py", "User Guide: Scheduling Rules"),
+		("pages/4_Generate_Schedule.py", "User Guide: Generate Schedule"),
+	],
+)
+def test_each_page_renders_user_guide(isolated_db, script_path: str, guide_label: str):
+	app = AppTest.from_file(str(ROOT / script_path))
+	app.session_state[AUTH_SESSION_KEY] = authenticated_session()
+	app.run(timeout=5)
+
+	assert not app.exception
+	assert guide_label in [item.label for item in app.expander]
+
+
+def test_home_help_is_consolidated_and_month_settings_is_collapsed_section(isolated_db):
+	app = AppTest.from_file(str(ROOT / "app.py"))
+	app.session_state[AUTH_SESSION_KEY] = authenticated_session()
+	app.run(timeout=5)
+
+	expander_labels = [item.label for item in app.expander]
+	assert "User Guide: Home" in expander_labels
+	assert "Month settings" in expander_labels
+	assert "Scheduling assumptions" not in expander_labels
+
+
+def test_standalone_help_expanders_are_removed(isolated_db):
+	availability = AppTest.from_file(str(ROOT / "pages/2_Availability_and_Preferences.py"))
+	availability.session_state[AUTH_SESSION_KEY] = authenticated_session()
+	availability.run(timeout=5)
+	assert "Priority rules" not in [item.label for item in availability.expander]
+
+	rules = AppTest.from_file(str(ROOT / "pages/3_Scheduling_Rules.py"))
+	rules.session_state[AUTH_SESSION_KEY] = authenticated_session()
+	rules.run(timeout=5)
+	assert "Rule examples" not in [item.label for item in rules.expander]
 
 
 def test_scheduling_rules_page_renders_rule_builder(isolated_db):
@@ -105,3 +150,25 @@ def test_scheduling_rules_page_renders_rule_builder(isolated_db):
 	assert "Priority" in selectbox_labels
 	assert "Target count" in number_labels
 	assert "Save scheduling rules" not in button_labels
+
+
+def test_availability_resident_selection_persists_and_saves(isolated_db):
+	app = AppTest.from_file(str(ROOT / "pages/2_Availability_and_Preferences.py"))
+	app.session_state[AUTH_SESSION_KEY] = authenticated_session()
+	app.run(timeout=5)
+
+	assert not app.exception
+	resident_selectbox = next(item for item in app.selectbox if item.label == "Resident")
+	assert "Ben" in resident_selectbox.options
+
+	resident_selectbox.select("Ben")
+	app.run(timeout=5)
+	assert next(item for item in app.selectbox if item.label == "Resident").value == "Ben"
+
+	next(button for button in app.button if button.label == "Add availability or preference").click()
+	app.run(timeout=5)
+
+	period_id = get_or_create_schedule_period(date.today().year, date.today().month, required_count=1)
+	requests = get_schedule_requests_for_editor(period_id)
+	assert len(requests) == 1
+	assert requests.iloc[0]["resident"] == "Ben"
