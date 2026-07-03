@@ -323,7 +323,6 @@ def _schema_sql(dialect: str) -> str:
 
 	CREATE TABLE IF NOT EXISTS schedule_requests (
 		id {id_type},
-		period_id INTEGER NOT NULL,
 		resident_id INTEGER NOT NULL,
 		start_date TEXT NOT NULL,
 		end_date TEXT NOT NULL,
@@ -332,7 +331,6 @@ def _schema_sql(dialect: str) -> str:
 		reason TEXT,
 		created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-		FOREIGN KEY (period_id) REFERENCES schedule_periods(id) ON DELETE CASCADE,
 		FOREIGN KEY (resident_id) REFERENCES residents(id) ON DELETE CASCADE
 	);
 
@@ -377,21 +375,20 @@ def _schema_sql(dialect: str) -> str:
 		FOREIGN KEY (period_id) REFERENCES schedule_periods(id) ON DELETE CASCADE
 	);
 
-	CREATE INDEX IF NOT EXISTS idx_schedule_requests_period_dates ON schedule_requests(period_id, start_date, end_date);
+	CREATE INDEX IF NOT EXISTS idx_schedule_requests_dates ON schedule_requests(start_date, end_date);
 	CREATE INDEX IF NOT EXISTS idx_schedule_rules_period ON schedule_rules(period_id);
 	CREATE INDEX IF NOT EXISTS idx_assignments_period_date ON assignments(period_id, work_date);
 	"""
 
 
 def _prepare_schema(conn: AppConnection) -> None:
-	if conn.dialect != "sqlite":
-		return
-
 	conn.execute("DROP TABLE IF EXISTS availability")
 	conn.execute("DROP TABLE IF EXISTS locked_assignments")
 	_prepare_resident_schema(conn)
 	_prepare_schedule_rule_schema(conn)
-	_prepare_schedule_period_schema(conn)
+	if conn.dialect == "sqlite":
+		_prepare_schedule_period_schema(conn)
+	_prepare_schedule_request_schema(conn)
 
 
 def _prepare_schedule_period_schema(conn: AppConnection) -> None:
@@ -410,6 +407,8 @@ def _prepare_schedule_period_schema(conn: AppConnection) -> None:
 	conn.execute("PRAGMA foreign_keys = OFF")
 	for child_table in ["schedule_requests", "schedule_rules", "assignments", "schedule_runs"]:
 		if _table_exists(conn, child_table):
+			if "period_id" not in _table_columns(conn, child_table):
+				continue
 			placeholders = ",".join("?" for _ in keeper_ids) or "NULL"
 			conn.execute(f"DELETE FROM {child_table} WHERE period_id NOT IN ({placeholders})", tuple(keeper_ids))
 
@@ -468,6 +467,50 @@ def _prepare_schedule_rule_schema(conn: AppConnection) -> None:
 		conn.execute("ALTER TABLE schedule_rules ADD COLUMN paired_weekday INTEGER")
 
 
+def _prepare_schedule_request_schema(conn: AppConnection) -> None:
+	if not _table_exists(conn, "schedule_requests"):
+		return
+	if "period_id" not in _table_columns(conn, "schedule_requests"):
+		return
+
+	if conn.dialect == "sqlite":
+		columns = _table_columns(conn, "schedule_requests")
+		created_expr = "COALESCE(created_at, CURRENT_TIMESTAMP)" if "created_at" in columns else "CURRENT_TIMESTAMP"
+		updated_expr = "COALESCE(updated_at, CURRENT_TIMESTAMP)" if "updated_at" in columns else "CURRENT_TIMESTAMP"
+		conn.execute("PRAGMA foreign_keys = OFF")
+		conn.execute(
+			"""
+			CREATE TABLE schedule_requests_new (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				resident_id INTEGER NOT NULL,
+				start_date TEXT NOT NULL,
+				end_date TEXT NOT NULL,
+				request_type TEXT NOT NULL,
+				priority TEXT NOT NULL,
+				reason TEXT,
+				created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				FOREIGN KEY (resident_id) REFERENCES residents(id) ON DELETE CASCADE
+			)
+			"""
+		)
+		conn.execute(
+			f"""
+			INSERT INTO schedule_requests_new (
+				id, resident_id, start_date, end_date, request_type, priority, reason, created_at, updated_at
+			)
+			SELECT id, resident_id, start_date, end_date, request_type, priority, reason, {created_expr}, {updated_expr}
+			FROM schedule_requests
+			"""
+		)
+		conn.execute("DROP TABLE schedule_requests")
+		conn.execute("ALTER TABLE schedule_requests_new RENAME TO schedule_requests")
+		conn.execute("PRAGMA foreign_keys = ON")
+		return
+
+	conn.execute("ALTER TABLE schedule_requests DROP COLUMN period_id")
+
+
 def _prepare_resident_schema(conn: AppConnection) -> None:
 	if not _table_exists(conn, "residents"):
 		return
@@ -508,6 +551,18 @@ def _next_resident_color(used_colors: set[str], resident_id: int) -> str:
 
 
 def _table_exists(conn: AppConnection, table_name: str) -> bool:
+	if conn.dialect != "sqlite":
+		return (
+			conn.execute(
+				"""
+				SELECT 1
+				FROM information_schema.tables
+				WHERE table_schema = current_schema() AND table_name = ?
+				""",
+				(table_name,),
+			).fetchone()
+			is not None
+		)
 	return (
 		conn.execute(
 			"SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
@@ -518,6 +573,18 @@ def _table_exists(conn: AppConnection, table_name: str) -> bool:
 
 
 def _table_columns(conn: AppConnection, table_name: str) -> set[str]:
+	if conn.dialect != "sqlite":
+		return {
+			row["column_name"]
+			for row in conn.execute(
+				"""
+				SELECT column_name
+				FROM information_schema.columns
+				WHERE table_schema = current_schema() AND table_name = ?
+				""",
+				(table_name,),
+			).fetchall()
+		}
 	return {row["name"] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
 
 

@@ -111,3 +111,22 @@ def test_local_sqlite_cache_avoids_repeated_remote_loader_calls(tmp_path, monkey
 
 	assert calls["count"] == 1
 	assert first.equals(second)
+
+
+def test_month_cache_clear_removes_versioned_remote_cache_entries(tmp_path, monkeypatch):
+	cache_path = tmp_path / "read_through_cache.sqlite"
+	monkeypatch.setattr(cache, "primary_database_is_remote", lambda: True)
+	monkeypatch.setattr(cache, "get_cache_db_path", lambda: cache_path)
+	calls = {"count": 0}
+
+	def loader():
+		calls["count"] += 1
+		return pd.DataFrame([{"value": calls["count"]}])
+
+	first = cache._read_through_local_cache("month:1:requests_editor", loader)
+	cache.clear_month_data_cache()
+	second = cache._read_through_local_cache("month:1:requests_editor", loader)
+
+	assert calls["count"] == 2
+	assert int(first.iloc[0]["value"]) == 1
+	assert int(second.iloc[0]["value"]) == 2

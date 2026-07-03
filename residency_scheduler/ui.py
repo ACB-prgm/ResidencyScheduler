@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
 import streamlit as st
 
@@ -15,6 +16,13 @@ MONTH_QUERY_PARAM = "month"
 APP_STATE_MONTH_KEY = "active_year_month"
 SAVED_MONTH_LOADED_KEY = "active_year_month_loaded"
 FLASH_KEY = "flash_messages"
+LOGO_PATH = Path(__file__).resolve().parents[1] / "assets" / "residency_scheduler_logo.png"
+
+
+def render_sidebar_logo(streamlit_module=st) -> None:
+	"""Render the app logo at the top of the sidebar when the asset is available."""
+	if LOGO_PATH.exists():
+		streamlit_module.image(str(LOGO_PATH), width="stretch")
 
 
 def render_page_header(title: str, caption: str, month_location: str | None = None) -> int | None:

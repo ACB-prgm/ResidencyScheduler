@@ -20,6 +20,7 @@ from residency_scheduler.cache import (
 	get_cached_month_context,
 	get_cached_resident_options,
 	get_cached_residents,
+	get_cached_workload_summary_for_scope,
 	preload_reference_data,
 )
 from residency_scheduler.repository import (
@@ -128,6 +129,7 @@ render_user_guide(
 	- **Run scheduler:** creates assignments for the month using active residents, availability, preferences, scheduling rules, and rolling fairness from prior months.
 	- **Calendar:** shows the generated schedule by date.
 	- **Workload summary:** shows total shifts, weekend shifts, hard assigned shifts, and manual shifts by resident.
+	  - Use the range selector to view the selected Month, L3M (selected month plus the prior two months), or YTD (January through the selected month).
 	- **Preference violations:** lists soft prefer-off entries that could not be honored.
 	- **Edit Assignment:** lets you manually reassign one unlocked assignment or swap residents between two unlocked assignments.
 	- **Google Calendar publishing:** writes the current schedule to a selected writable Google Calendar after deleting only prior Residency Scheduler events for the same month and calendar.
@@ -177,11 +179,19 @@ if not assignments.empty:
 
 	with workload_col:
 		st.markdown("### Workload summary")
-		summary = month_context["workload_summary"]
+		workload_range = st.radio(
+			"Workload range",
+			["Month", "L3M", "YTD"],
+			horizontal=True,
+			label_visibility="collapsed",
+			key=f"workload_range_{period_id}",
+		)
+		summary = get_cached_workload_summary_for_scope(period_id, workload_range)
+		st.caption(f"Showing workload: {workload_range}")
 		metric_cols = st.columns(2)
-		metric_cols[0].metric("Total shifts", len(assignments))
+		metric_cols[0].metric("Total shifts", int(summary["total_shifts"].sum()) if not summary.empty else 0)
 		metric_cols[1].metric("Violations", len(month_context["preference_violations"]))
-		st.dataframe(summary, width="stretch", hide_index=True)
+		st.dataframe(summary, width="stretch", hide_index=True, key=f"workload_summary_{period_id}_{workload_range.lower()}")
 
 	st.markdown("### Preference violations")
 	violations = month_context["preference_violations"]

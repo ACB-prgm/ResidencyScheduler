@@ -4,7 +4,7 @@
 
 Use the Year-Month selector at the top of any page to choose the month you are editing. The selected month is global, so changing it on one page updates the active month everywhere.
 
-Each year-month has one schedule. Availability, preferences, scheduling rules, generated assignments, manual edits, and calendar publishing settings all belong to the selected month.
+Each year-month has one schedule. Scheduling rules, generated assignments, manual edits, and calendar publishing settings belong to the selected month. Availability and preferences are global date ranges that appear on any selected month they overlap.
 
 ## Residents
 
@@ -17,7 +17,7 @@ Residents are the people eligible for call scheduling.
 
 ## Availability and Preferences
 
-Availability and Preferences are date-based entries. An entry can cover one date or a date range.
+Availability and Preferences are date-based entries. An entry can cover one date or a date range, and ranges can cross month boundaries. Cross-month entries appear on every selected month they overlap.
 
 - `vacation`, `unavailable`, `approved_absence`, and `medical_leave` default to hard.
 - `assign` defaults to hard and forces the resident onto the selected date.
@@ -71,6 +71,7 @@ Generate Schedule runs the solver for the selected month. The page shows:
 - Solver controls and recent run status
 - Calendar view
 - Workload summary
+  - Month shows only the selected month, L3M shows the selected month plus the prior two months, and YTD shows January through the selected month.
 - Preference violations
 - Manual reassign and swap tools
 - ICS export

@@ -171,6 +171,14 @@ def period_dates(period_id: int) -> list[str]:
 	return [date(int(period["year"]), int(period["month"]), day).isoformat() for day in range(1, last_day + 1)]
 
 
+def period_date_bounds(period_id: int) -> tuple[str, str]:
+	period = get_period(period_id)
+	last_day = calendar.monthrange(int(period["year"]), int(period["month"]))[1]
+	start = date(int(period["year"]), int(period["month"]), 1)
+	end = date(int(period["year"]), int(period["month"]), last_day)
+	return start.isoformat(), end.isoformat()
+
+
 def get_residents(active_only: bool = False) -> pd.DataFrame:
 	where = "WHERE active = 1" if active_only else ""
 	return read_sql(
@@ -282,23 +290,28 @@ def default_priority_for_request_type(request_type: str) -> str:
 	return "hard"
 
 
-def get_schedule_requests(period_id: int) -> pd.DataFrame:
+def get_schedule_requests_for_period(period_id: int) -> pd.DataFrame:
+	month_start, month_end = period_date_bounds(period_id)
 	return read_sql(
 		"""
-		SELECT sr.id, sr.period_id, sr.resident_id, r.name AS resident_name,
+		SELECT sr.id, sr.resident_id, r.name AS resident_name,
 			sr.start_date, sr.end_date, sr.request_type, sr.priority, sr.reason
 		FROM schedule_requests sr
 		JOIN residents r ON r.id = sr.resident_id
-		WHERE sr.period_id = ?
+		WHERE sr.start_date <= ? AND sr.end_date >= ?
 		ORDER BY sr.start_date, sr.end_date, r.name, sr.request_type
 		""",
-		(period_id,),
+		(month_end, month_start),
 	)
 
 
+def get_schedule_requests(period_id: int) -> pd.DataFrame:
+	return get_schedule_requests_for_period(period_id)
+
+
 def get_schedule_requests_for_editor(period_id: int) -> pd.DataFrame:
-	requests = get_schedule_requests(period_id)
-	columns = ["resident", "start_date", "end_date", "request_type", "priority", "reason"]
+	requests = get_schedule_requests_for_period(period_id)
+	columns = ["id", "resident_id", "resident", "start_date", "end_date", "request_type", "priority", "reason"]
 	if requests.empty:
 		return pd.DataFrame(columns=columns)
 
@@ -311,15 +324,18 @@ def get_schedule_requests_for_editor(period_id: int) -> pd.DataFrame:
 def replace_schedule_requests(period_id: int, df: pd.DataFrame) -> None:
 	columns = ["resident", "resident_id", "start_date", "end_date", "request_type", "priority", "reason"]
 	clean = _ensure_columns(df, columns)
+	month_start, month_end = period_date_bounds(period_id)
 	if clean.empty:
 		with get_connection() as conn:
-			conn.execute("DELETE FROM schedule_requests WHERE period_id = ?", (period_id,))
+			conn.execute(
+				"DELETE FROM schedule_requests WHERE start_date <= ? AND end_date >= ?",
+				(month_end, month_start),
+			)
 		return
 
 	resident_options = get_resident_options(active_only=True)
 	rows = []
 	expanded_rows = []
-	valid_dates = set(period_dates(period_id))
 	for row in clean.itertuples(index=False):
 		resident_id = _resolve_resident_id(row, resident_options)
 		start = _coerce_date(row.start_date, "Start date")
@@ -334,8 +350,6 @@ def replace_schedule_requests(period_id: int, df: pd.DataFrame) -> None:
 		if priority not in PRIORITIES:
 			raise ValueError(f"Invalid priority '{row.priority}'.")
 		for work_date in _date_range(start, end):
-			if work_date.isoformat() not in valid_dates:
-				raise ValueError(f"Request date {work_date.isoformat()} is outside the selected month.")
 			expanded_rows.append(
 				{
 					"resident_id": resident_id,
@@ -344,28 +358,120 @@ def replace_schedule_requests(period_id: int, df: pd.DataFrame) -> None:
 					"priority": priority,
 				}
 			)
-		rows.append((period_id, resident_id, start.isoformat(), end.isoformat(), request_type, priority, row.reason or ""))
+		rows.append((resident_id, start.isoformat(), end.isoformat(), request_type, priority, row.reason or ""))
 	_validate_schedule_request_conflicts(expanded_rows)
 
 	with get_connection() as conn:
-		conn.execute("DELETE FROM schedule_requests WHERE period_id = ?", (period_id,))
+		conn.execute(
+			"DELETE FROM schedule_requests WHERE start_date <= ? AND end_date >= ?",
+			(month_end, month_start),
+		)
 		conn.executemany(
 			"""
-			INSERT INTO schedule_requests (period_id, resident_id, start_date, end_date, request_type, priority, reason)
-			VALUES (?, ?, ?, ?, ?, ?, ?)
+			INSERT INTO schedule_requests (resident_id, start_date, end_date, request_type, priority, reason)
+			VALUES (?, ?, ?, ?, ?, ?)
 			""",
 			rows,
 		)
 
 
+def create_schedule_request(
+	resident_id: int,
+	start_date: date | str,
+	end_date: date | str,
+	request_type: str,
+	priority: str | None,
+	reason: str | None = None,
+) -> int:
+	start = _coerce_date(start_date, "Start date")
+	end = _coerce_date(end_date, "End date")
+	if end < start:
+		raise ValueError("End date cannot be before start date.")
+	request_type = str(request_type).strip().lower()
+	if request_type not in REQUEST_TYPES:
+		raise ValueError(f"Invalid request type '{request_type}'.")
+	priority_value = default_priority_for_request_type(request_type) if priority is None or str(priority).strip() == "" else priority
+	priority = str(priority_value).strip().lower()
+	if priority not in PRIORITIES:
+		raise ValueError(f"Invalid priority '{priority_value}'.")
+	active_resident_ids = set(get_residents(active_only=True)["id"].astype(int).tolist())
+	if int(resident_id) not in active_resident_ids:
+		raise ValueError("Select a valid active resident.")
+
+	expanded_rows = _expanded_request_conflict_rows(int(resident_id), start, end, request_type, priority)
+	expanded_rows.extend(_existing_request_conflict_rows(int(resident_id), start, end))
+	_validate_schedule_request_conflicts(expanded_rows)
+
+	with get_connection() as conn:
+		cursor = conn.execute(
+			"""
+			INSERT INTO schedule_requests (resident_id, start_date, end_date, request_type, priority, reason)
+			VALUES (?, ?, ?, ?, ?, ?)
+			RETURNING id
+			""",
+			(int(resident_id), start.isoformat(), end.isoformat(), request_type, priority, reason or ""),
+		)
+		return int(cursor.fetchone()["id"])
+
+
+def update_schedule_request(
+	request_id: int,
+	resident_id: int,
+	start_date: date | str,
+	end_date: date | str,
+	request_type: str,
+	priority: str | None,
+	reason: str | None = None,
+) -> None:
+	start = _coerce_date(start_date, "Start date")
+	end = _coerce_date(end_date, "End date")
+	if end < start:
+		raise ValueError("End date cannot be before start date.")
+	request_type = str(request_type).strip().lower()
+	if request_type not in REQUEST_TYPES:
+		raise ValueError(f"Invalid request type '{request_type}'.")
+	priority_value = default_priority_for_request_type(request_type) if priority is None or str(priority).strip() == "" else priority
+	priority = str(priority_value).strip().lower()
+	if priority not in PRIORITIES:
+		raise ValueError(f"Invalid priority '{priority_value}'.")
+	active_resident_ids = set(get_residents(active_only=True)["id"].astype(int).tolist())
+	if int(resident_id) not in active_resident_ids:
+		raise ValueError("Select a valid active resident.")
+
+	expanded_rows = _expanded_request_conflict_rows(int(resident_id), start, end, request_type, priority)
+	expanded_rows.extend(_existing_request_conflict_rows(int(resident_id), start, end, exclude_request_id=int(request_id)))
+	_validate_schedule_request_conflicts(expanded_rows)
+
+	with get_connection() as conn:
+		cursor = conn.execute(
+			"""
+			UPDATE schedule_requests
+			SET resident_id = ?, start_date = ?, end_date = ?, request_type = ?, priority = ?,
+				reason = ?, updated_at = CURRENT_TIMESTAMP
+			WHERE id = ?
+			""",
+			(int(resident_id), start.isoformat(), end.isoformat(), request_type, priority, reason or "", int(request_id)),
+		)
+		if cursor.rowcount == 0:
+			raise ValueError(f"Availability/preference #{request_id} was not found.")
+
+
+def delete_schedule_request(request_id: int) -> None:
+	with get_connection() as conn:
+		conn.execute("DELETE FROM schedule_requests WHERE id = ?", (int(request_id),))
+
+
 def get_expanded_schedule_requests(period_id: int) -> pd.DataFrame:
-	requests = get_schedule_requests(period_id)
+	requests = get_schedule_requests_for_period(period_id)
 	period = get_period(period_id)
+	valid_dates = set(period_dates(period_id))
 	rows: list[dict] = []
 	for request in requests.itertuples():
 		start = date.fromisoformat(str(request.start_date))
 		end = date.fromisoformat(str(request.end_date))
 		for work_date in _date_range(start, end):
+			if work_date.isoformat() not in valid_dates:
+				continue
 			rows.append(
 				{
 					"resident_id": int(request.resident_id),
@@ -486,33 +592,13 @@ def create_schedule_rule(
 	priority: str = "hard",
 	reason: str = "",
 ) -> None:
-	rule_type = str(rule_type or "").strip().lower()
-	if rule_type not in SCHEDULE_RULE_TYPES:
-		raise ValueError("Only weekday_count, weekday_pair_count, and away_rotation rules are supported.")
-	priority = str(priority or "hard").strip().lower()
-	if priority not in PRIORITIES:
-		raise ValueError(f"Invalid priority '{priority}'.")
-
-	if rule_type == "away_rotation":
-		weekday_value = 0
-		paired_weekday_value = None
-		target_count_value = 0
-	else:
-		if weekday is None:
-			raise ValueError("Weekday is required.")
-		weekday_value = int(weekday)
-		if weekday_value < 0 or weekday_value > 6:
-			raise ValueError("Weekday must be between 0 and 6.")
-		target_count_value = int(target_count if target_count is not None else 0)
-		if target_count_value < 0:
-			raise ValueError("Rule target count cannot be negative.")
-		paired_weekday_value = None
-		if rule_type == "weekday_pair_count":
-			if paired_weekday is None:
-				raise ValueError("Paired weekday is required.")
-			paired_weekday_value = int(paired_weekday)
-			if paired_weekday_value < 0 or paired_weekday_value > 6:
-				raise ValueError("Paired weekday must be between 0 and 6.")
+	rule_type, weekday_value, paired_weekday_value, target_count_value, priority = _coerce_schedule_rule_values(
+		rule_type=rule_type,
+		weekday=weekday,
+		paired_weekday=paired_weekday,
+		target_count=target_count,
+		priority=priority,
+	)
 
 	with get_connection() as conn:
 		conn.execute(
@@ -535,6 +621,49 @@ def create_schedule_rule(
 		)
 
 
+def update_schedule_rule(
+	rule_id: int,
+	period_id: int,
+	resident_id: int,
+	rule_type: str,
+	weekday: int | None = None,
+	paired_weekday: int | None = None,
+	target_count: int | None = None,
+	priority: str = "hard",
+	reason: str = "",
+) -> None:
+	rule_type, weekday_value, paired_weekday_value, target_count_value, priority = _coerce_schedule_rule_values(
+		rule_type=rule_type,
+		weekday=weekday,
+		paired_weekday=paired_weekday,
+		target_count=target_count,
+		priority=priority,
+	)
+
+	with get_connection() as conn:
+		cursor = conn.execute(
+			"""
+			UPDATE schedule_rules
+			SET resident_id = ?, rule_type = ?, weekday = ?, paired_weekday = ?, comparator = 'exactly',
+				target_count = ?, priority = ?, reason = ?
+			WHERE id = ? AND period_id = ?
+			""",
+			(
+				int(resident_id),
+				rule_type,
+				weekday_value,
+				paired_weekday_value,
+				target_count_value,
+				priority,
+				str(reason or ""),
+				int(rule_id),
+				int(period_id),
+			),
+		)
+		if cursor.rowcount == 0:
+			raise ValueError(f"Scheduling rule #{rule_id} was not found for the selected month.")
+
+
 def delete_schedule_rule(rule_id: int, period_id: int) -> None:
 	with get_connection() as conn:
 		conn.execute("DELETE FROM schedule_rules WHERE id = ? AND period_id = ?", (int(rule_id), int(period_id)))
@@ -544,6 +673,7 @@ def get_assignments(period_id: int) -> pd.DataFrame:
 	return read_sql(
 		"""
 		SELECT a.id, a.period_id, a.work_date, a.resident_id, r.name AS resident_name,
+			r.email AS resident_email,
 			r.color AS resident_color,
 			CASE
 				WHEN CAST(ROUND(r.weight) AS INTEGER) < 1 THEN 1
@@ -649,6 +779,96 @@ def _restore_missing_resident_ids_by_name(df: pd.DataFrame) -> None:
 			df.at[index, "id"] = resident_id
 
 
+def _expanded_request_conflict_rows(
+	resident_id: int,
+	start: date,
+	end: date,
+	request_type: str,
+	priority: str,
+) -> list[dict]:
+	return [
+		{
+			"resident_id": int(resident_id),
+			"work_date": work_date.isoformat(),
+			"request_type": request_type,
+			"priority": priority,
+		}
+		for work_date in _date_range(start, end)
+	]
+
+
+def _existing_request_conflict_rows(
+	resident_id: int,
+	start: date,
+	end: date,
+	exclude_request_id: int | None = None,
+) -> list[dict]:
+	where = "WHERE resident_id = ? AND start_date <= ? AND end_date >= ?"
+	params: list[object] = [int(resident_id), end.isoformat(), start.isoformat()]
+	if exclude_request_id is not None:
+		where += " AND id != ?"
+		params.append(int(exclude_request_id))
+	existing = read_sql(
+		f"""
+		SELECT resident_id, start_date, end_date, request_type, priority
+		FROM schedule_requests
+		{where}
+		""",
+		tuple(params),
+	)
+	rows: list[dict] = []
+	for request in existing.itertuples():
+		request_start = date.fromisoformat(str(request.start_date))
+		request_end = date.fromisoformat(str(request.end_date))
+		overlap_start = max(start, request_start)
+		overlap_end = min(end, request_end)
+		rows.extend(
+			_expanded_request_conflict_rows(
+				int(request.resident_id),
+				overlap_start,
+				overlap_end,
+				str(request.request_type),
+				str(request.priority),
+			)
+		)
+	return rows
+
+
+def _coerce_schedule_rule_values(
+	rule_type: str,
+	weekday: int | None,
+	paired_weekday: int | None,
+	target_count: int | None,
+	priority: str,
+) -> tuple[str, int, int | None, int, str]:
+	rule_type = str(rule_type or "").strip().lower()
+	if rule_type not in SCHEDULE_RULE_TYPES:
+		raise ValueError("Only weekday_count, weekday_pair_count, and away_rotation rules are supported.")
+	priority = str(priority or "hard").strip().lower()
+	if priority not in PRIORITIES:
+		raise ValueError(f"Invalid priority '{priority}'.")
+
+	if rule_type == "away_rotation":
+		return rule_type, 0, None, 0, priority
+
+	if weekday is None:
+		raise ValueError("Weekday is required.")
+	weekday_value = int(weekday)
+	if weekday_value < 0 or weekday_value > 6:
+		raise ValueError("Weekday must be between 0 and 6.")
+	target_count_value = int(target_count if target_count is not None else 0)
+	if target_count_value < 0:
+		raise ValueError("Rule target count cannot be negative.")
+	paired_weekday_value = None
+	if rule_type == "weekday_pair_count":
+		if paired_weekday is None:
+			raise ValueError("Paired weekday is required.")
+		paired_weekday_value = int(paired_weekday)
+		if paired_weekday_value < 0 or paired_weekday_value > 6:
+			raise ValueError("Paired weekday must be between 0 and 6.")
+	return rule_type, weekday_value, paired_weekday_value, target_count_value, priority
+
+
 def _validate_schedule_request_conflicts(expanded_rows: list[dict]) -> None:
 	if not expanded_rows:
 		return
@@ -737,11 +957,10 @@ def update_assignment_resident(
 		if make_locked:
 			conn.execute(
 				"""
-				INSERT INTO schedule_requests (period_id, resident_id, start_date, end_date, request_type, priority, reason)
-				VALUES (?, ?, ?, ?, 'assign', 'hard', ?)
+				INSERT INTO schedule_requests (resident_id, start_date, end_date, request_type, priority, reason)
+				VALUES (?, ?, ?, 'assign', 'hard', ?)
 				""",
 				(
-					int(current["period_id"]),
 					int(resident_id),
 					str(current["work_date"]),
 					str(current["work_date"]),
@@ -806,12 +1025,12 @@ def swap_assignment_residents(
 			reason = lock_reason or "Manual review swap"
 			conn.executemany(
 				"""
-				INSERT INTO schedule_requests (period_id, resident_id, start_date, end_date, request_type, priority, reason)
-				VALUES (?, ?, ?, ?, 'assign', 'hard', ?)
+				INSERT INTO schedule_requests (resident_id, start_date, end_date, request_type, priority, reason)
+				VALUES (?, ?, ?, 'assign', 'hard', ?)
 				""",
 				[
-					(int(first["period_id"]), int(second["resident_id"]), str(first["work_date"]), str(first["work_date"]), reason),
-					(int(second["period_id"]), int(first["resident_id"]), str(second["work_date"]), str(second["work_date"]), reason),
+					(int(second["resident_id"]), str(first["work_date"]), str(first["work_date"]), reason),
+					(int(first["resident_id"]), str(second["work_date"]), str(second["work_date"]), reason),
 				],
 			)
 
@@ -871,6 +1090,46 @@ def record_solver_run(period_id: int, solver_status: str, objective_score: float
 
 def get_workload_summary(period_id: int) -> pd.DataFrame:
 	assignments = get_assignments(period_id)
+	return _summarize_workload_assignments(assignments)
+
+
+def get_workload_summary_for_scope(period_id: int, scope: str) -> pd.DataFrame:
+	period = get_period(period_id)
+	_, month_end = period_date_bounds(period_id)
+	scope_key = str(scope).strip().lower()
+	if scope_key == "month":
+		month_start, _ = period_date_bounds(period_id)
+		start_date = date.fromisoformat(month_start)
+	elif scope_key == "l3m":
+		selected_month = date(int(period["year"]), int(period["month"]), 1)
+		start_date = _previous_month(_previous_month(selected_month))
+	elif scope_key == "ytd":
+		start_date = date(int(period["year"]), 1, 1)
+	else:
+		raise ValueError("Workload scope must be Month, L3M, or YTD.")
+
+	assignments = read_sql(
+		"""
+		SELECT a.id, a.period_id, a.work_date, a.resident_id, r.name AS resident_name,
+			r.email AS resident_email,
+			r.color AS resident_color,
+			CASE
+				WHEN CAST(ROUND(r.weight) AS INTEGER) < 1 THEN 1
+				WHEN CAST(ROUND(r.weight) AS INTEGER) > 5 THEN 5
+				ELSE CAST(ROUND(r.weight) AS INTEGER)
+			END AS resident_pgy,
+			a.source, a.is_locked, a.google_event_id
+		FROM assignments a
+		JOIN residents r ON r.id = a.resident_id
+		WHERE a.work_date >= ? AND a.work_date <= ?
+		ORDER BY a.work_date, r.name
+		""",
+		(start_date.isoformat(), month_end),
+	)
+	return _summarize_workload_assignments(assignments)
+
+
+def _summarize_workload_assignments(assignments: pd.DataFrame) -> pd.DataFrame:
 	if assignments.empty:
 		return pd.DataFrame(columns=["resident_name", "total_shifts", "weekend_shifts", "hard_assigned_shifts", "manual_shifts"])
 

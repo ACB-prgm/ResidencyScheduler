@@ -92,6 +92,24 @@ def test_build_assignment_event_contains_schedule_metadata():
 		"rs_year_month": "2026-08",
 		"rs_assignment_id": "42",
 	}
+	assert "attendees" not in event
+
+
+def test_build_assignment_event_adds_resident_attendee_when_email_exists():
+	assignment = pd.DataFrame(
+		[
+			{
+				"id": 42,
+				"work_date": "2026-08-15",
+				"resident_name": "Ada Smith",
+				"resident_email": "ada@example.com",
+			}
+		]
+	).itertuples().__next__()
+
+	event = google.build_assignment_event({"id": 7, "year": 2026, "month": 8}, assignment)
+
+	assert event["attendees"] == [{"email": "ada@example.com", "displayName": "Ada Smith"}]
 
 
 def test_publish_period_wipes_existing_events_and_stores_new_event_ids(isolated_google_db):
@@ -117,6 +135,8 @@ def test_publish_period_wipes_existing_events_and_stores_new_event_ids(isolated_
 	assert service.deleted == [("calendar@example.org", "old-event")]
 	assert updated["google_event_id"].tolist() == ["created-1", "created-2"]
 	assert len(service.inserted) == 2
+	assert service.inserted[0][2] == "all"
+	assert service.inserted[0][1]["attendees"] == [{"email": "ada@example.com", "displayName": "Ada"}]
 	assert service.event_list_calls[0]["privateExtendedProperty"] == [
 		"rs_app=residency_scheduler",
 		f"rs_period_id={period_id}",
@@ -178,6 +198,7 @@ def test_publish_period_batches_deletes_and_inserts_when_available(isolated_goog
 	assert result.inserted_count == 2
 	assert service.batch_execute_count == 2
 	assert service.deleted == [("calendar@example.org", "old-1"), ("calendar@example.org", "old-2")]
+	assert service.inserted[0][2] == "all"
 	assert updated["google_event_id"].tolist() == ["batch-created-1", "batch-created-2"]
 
 
@@ -249,8 +270,8 @@ class FakeEventsResource:
 	def delete(self, calendarId, eventId):
 		return FakeGoogleRequest(self.service, "delete", calendarId=calendarId, eventId=eventId)
 
-	def insert(self, calendarId, body):
-		return FakeGoogleRequest(self.service, "insert", calendarId=calendarId, body=body)
+	def insert(self, calendarId, body, sendUpdates=None):
+		return FakeGoogleRequest(self.service, "insert", calendarId=calendarId, body=body, sendUpdates=sendUpdates)
 
 
 class FakeRequest:
@@ -272,7 +293,7 @@ class FakeGoogleRequest:
 			self.service.deleted.append((self.kwargs["calendarId"], self.kwargs["eventId"]))
 			return {}
 		if self.action == "insert":
-			self.service.inserted.append((self.kwargs["calendarId"], self.kwargs["body"]))
+			self.service.inserted.append((self.kwargs["calendarId"], self.kwargs["body"], self.kwargs.get("sendUpdates")))
 			return {"id": f"created-{len(self.service.inserted)}"}
 		return {}
 
@@ -281,7 +302,7 @@ class FakeGoogleRequest:
 			self.service.deleted.append((self.kwargs["calendarId"], self.kwargs["eventId"]))
 			return {}
 		if self.action == "insert":
-			self.service.inserted.append((self.kwargs["calendarId"], self.kwargs["body"]))
+			self.service.inserted.append((self.kwargs["calendarId"], self.kwargs["body"], self.kwargs.get("sendUpdates")))
 			return {"id": f"batch-created-{len(self.service.inserted)}"}
 		return {}
 

@@ -22,6 +22,7 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 
 from residency_scheduler.db import get_connection, init_db
+from residency_scheduler.ui import render_sidebar_logo
 
 GOOGLE_LOGIN_SCOPES = ["openid", "email", "profile"]
 GOOGLE_CALENDAR_SCOPES = [
@@ -82,6 +83,8 @@ def require_google_auth(render_sidebar: bool = True) -> dict[str, Any]:
 			return remembered_session
 
 	_hide_unauthenticated_navigation()
+	with st.sidebar:
+		render_sidebar_logo(st)
 	st.title("Residency Scheduler")
 	st.caption("Sign in with Google to continue.")
 
@@ -626,6 +629,7 @@ def _parse_timestamp(value: Any) -> datetime | None:
 def _render_signed_in_sidebar(session: dict[str, Any]) -> None:
 	_emit_pending_remember_cookie()
 	with st.sidebar:
+		render_sidebar_logo(st)
 		st.caption(f"Signed in as {session.get('email', '')}")
 		if st.button("Sign out", key="google_sign_out"):
 			sign_out()
@@ -637,9 +641,10 @@ def _hide_unauthenticated_navigation() -> None:
 		"""
 		<style>
 			section[data-testid="stSidebar"] {
-				display: none;
+				display: block;
 			}
-			div[data-testid="stSidebarCollapsedControl"] {
+			section[data-testid="stSidebar"] nav,
+			section[data-testid="stSidebar"] [data-testid="stSidebarNav"] {
 				display: none;
 			}
 		</style>

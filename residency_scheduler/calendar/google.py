@@ -125,7 +125,7 @@ def build_assignment_event(period: dict[str, Any], assignment, time_zone: str = 
 	year_month = f"{int(period['year'])}-{int(period['month']):02d}"
 	assignment_id = str(int(assignment.id))
 	resident_name = str(assignment.resident_name)
-	return {
+	event = {
 		"summary": resident_name,
 		"description": (
 			"DO NOT EDIT OR DELETE ANY OF THIS INFORMATION\n"
@@ -145,6 +145,10 @@ def build_assignment_event(period: dict[str, Any], assignment, time_zone: str = 
 			}
 		},
 	}
+	resident_email = str(getattr(assignment, "resident_email", "") or "").strip()
+	if resident_email:
+		event["attendees"] = [{"email": resident_email, "displayName": resident_name}]
+	return event
 
 
 def _list_existing_period_event_ids(service, calendar_id: str, period: dict[str, Any], time_zone: str = DEFAULT_TIME_ZONE) -> list[str]:
@@ -223,7 +227,7 @@ def _insert_assignment_events(service, calendar_id: str, period: dict[str, Any],
 		for assignment in assignment_rows:
 			event = build_assignment_event(period, assignment, time_zone=time_zone)
 			batch.add(
-				service.events().insert(calendarId=calendar_id, body=event),
+				service.events().insert(calendarId=calendar_id, body=event, sendUpdates="all"),
 				request_id=f"insert-{int(assignment.id)}",
 			)
 		batch.execute()
@@ -235,7 +239,7 @@ def _insert_assignment_events(service, calendar_id: str, period: dict[str, Any],
 
 	for assignment in assignment_rows:
 		event = build_assignment_event(period, assignment, time_zone=time_zone)
-		created = service.events().insert(calendarId=calendar_id, body=event).execute()
+		created = service.events().insert(calendarId=calendar_id, body=event, sendUpdates="all").execute()
 		event_id = str(created.get("id") or "")
 		if event_id:
 			update_assignment_google_event_id(int(assignment.id), event_id)

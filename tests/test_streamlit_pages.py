@@ -9,7 +9,14 @@ from streamlit.testing.v1 import AppTest
 
 from residency_scheduler.auth import AUTH_SESSION_KEY, GOOGLE_CALENDAR_SCOPES
 from residency_scheduler.db import init_db
-from residency_scheduler.repository import get_or_create_schedule_period, get_schedule_requests_for_editor, save_residents
+from residency_scheduler.repository import (
+	create_schedule_rule,
+	create_schedule_request,
+	get_or_create_schedule_period,
+	get_schedule_requests_for_editor,
+	get_schedule_rules,
+	save_residents,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -70,6 +77,7 @@ def test_unauthenticated_home_shows_sign_in_gate(isolated_db):
 
 	assert not app.exception
 	assert app.title[0].value == "Residency Scheduler"
+	assert len(app.sidebar.children) >= 1
 	assert not app.error
 	assert len(app.selectbox) == 0
 
@@ -79,8 +87,19 @@ def test_unauthenticated_direct_page_shows_sign_in_gate(isolated_db):
 	app.run(timeout=5)
 
 	assert not app.exception
+	assert len(app.sidebar.children) >= 1
 	assert not app.error
 	assert len(app.slider) == 0
+
+
+def test_authenticated_sidebar_shows_logo_and_sign_out(isolated_db):
+	app = AppTest.from_file(str(ROOT / "pages/1_Residents.py"))
+	app.session_state[AUTH_SESSION_KEY] = authenticated_session()
+	app.run(timeout=5)
+
+	assert not app.exception
+	assert len(app.sidebar.children) >= 3
+	assert "Sign out" in [button.label for button in app.button]
 
 
 def test_home_defaults_to_current_year_month(isolated_db):
@@ -172,3 +191,100 @@ def test_availability_resident_selection_persists_and_saves(isolated_db):
 	requests = get_schedule_requests_for_editor(period_id)
 	assert len(requests) == 1
 	assert requests.iloc[0]["resident"] == "Ben"
+
+
+def test_availability_end_date_is_not_before_start_date(isolated_db):
+	app = AppTest.from_file(str(ROOT / "pages/2_Availability_and_Preferences.py"))
+	app.session_state[AUTH_SESSION_KEY] = authenticated_session()
+	period_id = get_or_create_schedule_period(date.today().year, date.today().month, required_count=1)
+	app.session_state[f"request_start_{period_id}"] = date(date.today().year, date.today().month, 10)
+	app.session_state[f"request_end_{period_id}"] = date(date.today().year, date.today().month, 5)
+	app.run(timeout=5)
+
+	assert not app.exception
+	assert app.session_state[f"request_end_{period_id}"] == app.session_state[f"request_start_{period_id}"]
+
+
+def test_availability_page_edits_existing_row(isolated_db):
+	period_id = get_or_create_schedule_period(date.today().year, date.today().month, required_count=1)
+	create_schedule_request(1, date(date.today().year, date.today().month, 10), date(date.today().year, date.today().month, 10), "vacation", "hard", "Original")
+	app = AppTest.from_file(str(ROOT / "pages/2_Availability_and_Preferences.py"))
+	app.session_state[AUTH_SESSION_KEY] = authenticated_session()
+	app.run(timeout=5)
+
+	assert not app.exception
+	assert "Edit" in [button.label for button in app.button]
+	next(button for button in app.button if button.label == "Edit").click()
+	app.run(timeout=5)
+
+	assert not app.exception
+	assert next(item for item in app.selectbox if item.label == "Resident").value == "Ada"
+	next(item for item in app.selectbox if item.label == "Resident").select("Ben")
+	next(item for item in app.selectbox if item.label == "Availability type").select("prefer_off")
+	next(item for item in app.selectbox if item.label == "Priority").select("soft")
+	next(item for item in app.text_input if item.label == "Reason").set_value("Updated reason")
+	next(button for button in app.button if button.label == "Save changes").click()
+	app.run(timeout=5)
+
+	requests = get_schedule_requests_for_editor(period_id)
+	assert len(requests) == 1
+	assert requests.iloc[0]["resident"] == "Ben"
+	assert requests.iloc[0]["request_type"] == "prefer_off"
+	assert requests.iloc[0]["priority"] == "soft"
+	assert requests.iloc[0]["reason"] == "Updated reason"
+
+
+def test_availability_page_cancel_exits_edit_mode(isolated_db):
+	period_id = get_or_create_schedule_period(date.today().year, date.today().month, required_count=1)
+	create_schedule_request(1, date(date.today().year, date.today().month, 10), date(date.today().year, date.today().month, 10), "vacation", "hard", "Original")
+	app = AppTest.from_file(str(ROOT / "pages/2_Availability_and_Preferences.py"))
+	app.session_state[AUTH_SESSION_KEY] = authenticated_session()
+	app.run(timeout=5)
+	next(button for button in app.button if button.label == "Edit").click()
+	app.run(timeout=5)
+	next(button for button in app.button if button.label == "Cancel").click()
+	app.run(timeout=5)
+
+	assert not app.exception
+	assert "Add availability or preference" in [button.label for button in app.button]
+
+
+def test_scheduling_rules_page_edits_existing_rule(isolated_db):
+	period_id = get_or_create_schedule_period(date.today().year, date.today().month, required_count=1)
+	create_schedule_rule(period_id, 2, "weekday_count", weekday=4, target_count=1, priority="hard", reason="Original")
+	app = AppTest.from_file(str(ROOT / "pages/3_Scheduling_Rules.py"))
+	app.session_state[AUTH_SESSION_KEY] = authenticated_session()
+	app.run(timeout=5)
+
+	assert not app.exception
+	assert "Edit" in [button.label for button in app.button]
+	next(button for button in app.button if button.label == "Edit").click()
+	app.run(timeout=5)
+
+	assert not app.exception
+	assert next(item for item in app.selectbox if item.label == "Rule type").value == "Weekday count"
+	assert next(item for item in app.selectbox if item.label == "Resident").value == "Ben"
+	next(item for item in app.selectbox if item.label == "Rule type").select("Away rotation")
+	app.run(timeout=5)
+	next(button for button in app.button if button.label == "Save changes").click()
+	app.run(timeout=5)
+
+	rules = get_schedule_rules(period_id)
+	assert len(rules) == 1
+	assert rules.iloc[0]["rule_type"] == "away_rotation"
+	assert int(rules.iloc[0]["resident_id"]) == 2
+
+
+def test_scheduling_rules_page_cancel_exits_edit_mode(isolated_db):
+	period_id = get_or_create_schedule_period(date.today().year, date.today().month, required_count=1)
+	create_schedule_rule(period_id, 1, "weekday_count", weekday=4, target_count=1, priority="hard", reason="Original")
+	app = AppTest.from_file(str(ROOT / "pages/3_Scheduling_Rules.py"))
+	app.session_state[AUTH_SESSION_KEY] = authenticated_session()
+	app.run(timeout=5)
+	next(button for button in app.button if button.label == "Edit").click()
+	app.run(timeout=5)
+	next(button for button in app.button if button.label == "Cancel").click()
+	app.run(timeout=5)
+
+	assert not app.exception
+	assert "Add rule" in [button.label for button in app.button]

@@ -13,14 +13,16 @@ from residency_scheduler.db import get_cache_db_path, get_database_url, init_db,
 from residency_scheduler import repository
 
 T = TypeVar("T")
+CACHE_KEY_VERSION = "v4"
+SCHEMA_INIT_VERSION = "schedule-requests-global-v1"
 
 
 def ensure_database_initialized() -> bool:
-	return _ensure_database_initialized(get_database_url())
+	return _ensure_database_initialized(get_database_url(), SCHEMA_INIT_VERSION)
 
 
 @st.cache_resource(show_spinner=False)
-def _ensure_database_initialized(database_url: str) -> bool:
+def _ensure_database_initialized(database_url: str, schema_version: str) -> bool:
 	init_db()
 	return True
 
@@ -129,6 +131,19 @@ def _get_cached_workload_summary(database_url: str, period_id: int) -> pd.DataFr
 	return _read_through_local_cache(f"month:{period_id}:workload_summary", lambda: repository.get_workload_summary(period_id))
 
 
+def get_cached_workload_summary_for_scope(period_id: int, scope: str) -> pd.DataFrame:
+	return _get_cached_workload_summary_for_scope(get_database_url(), period_id, scope)
+
+
+@st.cache_data(show_spinner=False)
+def _get_cached_workload_summary_for_scope(database_url: str, period_id: int, scope: str) -> pd.DataFrame:
+	scope_key = str(scope).strip().lower()
+	return _read_through_local_cache(
+		f"month:{period_id}:workload_summary:{scope_key}",
+		lambda: repository.get_workload_summary_for_scope(period_id, scope_key),
+	)
+
+
 def get_cached_preference_violations(period_id: int) -> pd.DataFrame:
 	return _get_cached_preference_violations(get_database_url(), period_id)
 
@@ -184,6 +199,7 @@ def clear_month_data_cache() -> None:
 	_get_cached_schedule_rules_for_editor.clear()
 	_get_cached_assignments.clear()
 	_get_cached_workload_summary.clear()
+	_get_cached_workload_summary_for_scope.clear()
 	_get_cached_preference_violations.clear()
 	_get_cached_latest_schedule_runs.clear()
 	_get_cached_month_context.clear()
@@ -200,6 +216,7 @@ def _read_through_local_cache(cache_key: str, loader: Callable[[], T]) -> T:
 	if not primary_database_is_remote():
 		return loader()
 
+	cache_key = f"{CACHE_KEY_VERSION}:{cache_key}"
 	cached = _get_local_cache_value(cache_key)
 	if cached is not None:
 		return cached
@@ -238,7 +255,13 @@ def _clear_local_cache_prefix(prefix: str) -> None:
 		return
 	with _local_cache_connection() as conn:
 		_ensure_local_cache_schema(conn)
-		conn.execute("DELETE FROM local_cache WHERE cache_key LIKE ?", (f"{prefix}%",))
+		conn.execute(
+			"""
+			DELETE FROM local_cache
+			WHERE cache_key LIKE ? OR cache_key LIKE ?
+			""",
+			(f"{prefix}%", f"%:{prefix}%"),
+		)
 
 
 def _local_cache_connection() -> sqlite3.Connection:

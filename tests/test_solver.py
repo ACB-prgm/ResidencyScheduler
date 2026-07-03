@@ -7,6 +7,7 @@ import pytest
 
 from residency_scheduler.db import init_db
 from residency_scheduler.repository import (
+	create_schedule_request,
 	get_or_create_schedule_period,
 	get_assignments,
 	get_expanded_schedule_requests,
@@ -99,6 +100,28 @@ def test_date_range_vacation_is_honored(isolated_db):
 		assert 1 not in assignments[work_date]
 
 
+def test_cross_month_vacation_blocks_only_selected_month_dates(isolated_db):
+	add_residents(["Ada", "Ben", "Cam", "Dee"], max_shifts=20)
+	september_id = get_or_create_schedule_period(2026, 9, required_count=1)
+	october_id = get_or_create_schedule_period(2026, 10, required_count=1)
+	create_schedule_request(1, "2026-09-25", "2026-10-10", "vacation", "hard", "PTO")
+
+	september_expanded = get_expanded_schedule_requests(september_id)
+	october_expanded = get_expanded_schedule_requests(october_id)
+	september_vacation = september_expanded[september_expanded["request_type"] == "vacation"]
+	october_vacation = october_expanded[october_expanded["request_type"] == "vacation"]
+
+	assert set(september_vacation["work_date"]) == {f"2026-09-{day:02d}" for day in range(25, 31)}
+	assert set(october_vacation["work_date"]) == {f"2026-10-{day:02d}" for day in range(1, 11)}
+
+	result = solve_period(october_id, max_time_seconds=5)
+	assignments = assignments_by_date(october_id)
+
+	assert result.status in {"OPTIMAL", "FEASIBLE"}
+	for work_date in [f"2026-10-{day:02d}" for day in range(1, 11)]:
+		assert 1 not in assignments[work_date]
+
+
 def test_vacation_adds_prior_thursday_prefer_work(isolated_db):
 	add_residents(["Ada", "Ben", "Cam"], max_shifts=12)
 	period_id = get_or_create_schedule_period(2026, 2, required_count=1)
@@ -127,6 +150,24 @@ def test_vacation_adds_prior_thursday_prefer_work(isolated_db):
 		& (expanded["source"] == "derived")
 	]
 	assert not derived.empty
+
+
+def test_cross_month_vacation_derived_thursday_stays_in_selected_month(isolated_db):
+	add_residents(["Ada", "Ben", "Cam"], max_shifts=20)
+	september_id = get_or_create_schedule_period(2026, 9, required_count=1)
+	october_id = get_or_create_schedule_period(2026, 10, required_count=1)
+	create_schedule_request(1, "2026-10-05", "2026-10-10", "vacation", "hard", "PTO")
+
+	september_expanded = get_expanded_schedule_requests(september_id)
+	october_expanded = get_expanded_schedule_requests(october_id)
+
+	assert "2026-10-01" not in set(september_expanded["work_date"])
+	assert not october_expanded[
+		(october_expanded["resident_id"] == 1)
+		& (october_expanded["work_date"] == "2026-10-01")
+		& (october_expanded["request_type"] == "prefer_work")
+		& (october_expanded["source"] == "derived")
+	].empty
 
 
 def test_hard_assign_request_is_honored(isolated_db):

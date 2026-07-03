@@ -450,6 +450,7 @@ def test_unauthenticated_gate_stops_before_scheduler_content(monkeypatch):
 		raise AssertionError("require_google_auth should stop unauthenticated execution")
 
 	assert stub.stopped
+	assert stub.images
 	assert "Google OAuth is not configured" in stub.errors[0]
 
 
@@ -464,7 +465,15 @@ class AuthStreamlitStub:
 		self.errors: list[str] = []
 		self.markdowns: list[str] = []
 		self.htmls: list[str] = []
+		self.images: list[str] = []
 		self.stopped = False
+		self.sidebar = self
+
+	def __enter__(self):
+		return self
+
+	def __exit__(self, exc_type, exc, traceback):
+		return False
 
 	def title(self, _value):
 		return None
@@ -480,6 +489,9 @@ class AuthStreamlitStub:
 
 	def html(self, value):
 		self.htmls.append(value)
+
+	def image(self, value, **_kwargs):
+		self.images.append(value)
 
 	def stop(self):
 		self.stopped = True
