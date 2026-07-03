@@ -209,13 +209,13 @@ def test_relaxed_oauthlib_token_scope_restores_existing_env(monkeypatch):
 	assert auth.os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] == "existing"
 
 
-def test_same_tab_sign_in_link_uses_self_target(monkeypatch):
+def test_same_tab_sign_in_link_targets_top_window(monkeypatch):
 	stub = AuthStreamlitStub()
 	monkeypatch.setattr(auth, "st", stub)
 
 	auth._render_same_tab_sign_in_link("https://accounts.google.com/o/oauth2/auth?client_id=client")
 
-	assert 'target="_self"' in stub.htmls[-1]
+	assert 'target="_top"' in stub.htmls[-1]
 	assert "Sign in with Google" in stub.htmls[-1]
 
 

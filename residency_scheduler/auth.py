@@ -657,7 +657,7 @@ def _render_same_tab_sign_in_link(auth_url: str) -> None:
 		f"""
 		<a
 			href="{html.escape(auth_url, quote=True)}"
-			target="_self"
+			target="_top"
 			style="
 				display: inline-flex;
 				align-items: center;
