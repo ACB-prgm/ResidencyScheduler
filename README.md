@@ -78,7 +78,7 @@ Database files, local secrets, credentials, tokens, virtual environments, and bu
 
 ## Google Sign-In
 
-The app requires Google sign-in before any scheduler page loads. For local testing, use a Google OAuth Web application client with `http://localhost:8501` added as an authorized redirect URI. For Streamlit deployment, add the deployed root URL, for example `https://HuntingtonHealthResidencyScheduler.streamlit.app`.
+The app requires Google sign-in before any scheduler page loads. For local testing, use a Google OAuth Web application client with `http://localhost:8501` added as an authorized redirect URI. For Streamlit deployment, add the deployed root URL, `https://huntingtonhealthresidencyscheduler.streamlit.app`.
 
 Configure deployment secrets:
 
@@ -86,10 +86,10 @@ Configure deployment secrets:
 [google]
 client_id = "..."
 client_secret = "..."
-redirect_uri = "https://HuntingtonHealthResidencyScheduler.streamlit.app"
+redirect_uri = "https://huntingtonhealthresidencyscheduler.streamlit.app"
 token_encryption_key = "base64-url-safe-fernet-key"
-allowed_domains = ["huntingtonhealth.org"]
-allowed_emails = ["user@huntingtonhealth.org"]
+allowed_domains = []
+allowed_emails = []
 ```
 
 For local development, copy the relevant values from the ignored Google client JSON into `.streamlit/secrets.toml` so the local app uses the same `st.secrets` interface as Streamlit Cloud. Authenticated user details are cached in the Streamlit session so page navigation does not reread Google or Neon. The initial sign-in requests Calendar access so Generate Schedule can publish to a selected writable Google Calendar. When `token_encryption_key` is configured, OAuth credentials are stored encrypted in the primary database and the browser keeps an opaque remember-session cookie. New app sessions restore the encrypted token, refresh it when needed, and only require Google sign-in again when the stored token cannot be refreshed.
@@ -148,6 +148,10 @@ The Generate Schedule page provides a downloadable call-schedule `.ics` file and
 See `.env.example` for optional local configuration.
 
 For user-facing workflow details and rule examples, see [docs/user_guide.md](docs/user_guide.md).
+
+For Streamlit Community Cloud deployment steps, secrets, and Google OAuth settings, see [docs/streamlit_deployment_checklist.md](docs/streamlit_deployment_checklist.md).
+
+For deployment-facing legal and OAuth consent documents, see [docs/privacy_policy.md](docs/privacy_policy.md) and [docs/terms_of_service.md](docs/terms_of_service.md).
 
 ## Tests
 
