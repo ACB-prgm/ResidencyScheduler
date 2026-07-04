@@ -209,14 +209,18 @@ def test_relaxed_oauthlib_token_scope_restores_existing_env(monkeypatch):
 	assert auth.os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] == "existing"
 
 
-def test_same_tab_sign_in_link_targets_top_window(monkeypatch):
+def test_sign_in_link_uses_native_streamlit_link_button(monkeypatch):
 	stub = AuthStreamlitStub()
 	monkeypatch.setattr(auth, "st", stub)
 
 	auth._render_same_tab_sign_in_link("https://accounts.google.com/o/oauth2/auth?client_id=client")
 
-	assert 'target="_top"' in stub.htmls[-1]
-	assert "Sign in with Google" in stub.htmls[-1]
+	assert stub.link_buttons[-1] == {
+		"label": "Sign in with Google",
+		"url": "https://accounts.google.com/o/oauth2/auth?client_id=client",
+		"type": "primary",
+	}
+	assert not stub.htmls
 
 
 def test_token_encryption_round_trips_without_plaintext():
@@ -466,6 +470,7 @@ class AuthStreamlitStub:
 		self.markdowns: list[str] = []
 		self.htmls: list[str] = []
 		self.images: list[str] = []
+		self.link_buttons: list[dict] = []
 		self.stopped = False
 		self.sidebar = self
 
@@ -492,6 +497,10 @@ class AuthStreamlitStub:
 
 	def image(self, value, **_kwargs):
 		self.images.append(value)
+
+	def link_button(self, label, url, **kwargs):
+		self.link_buttons.append({"label": label, "url": url, "type": kwargs.get("type")})
+		return None
 
 	def stop(self):
 		self.stopped = True
