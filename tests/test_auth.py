@@ -209,17 +209,19 @@ def test_relaxed_oauthlib_token_scope_restores_existing_env(monkeypatch):
 	assert auth.os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] == "existing"
 
 
-def test_sign_in_link_uses_same_tab_markdown_anchor(monkeypatch):
+def test_sign_in_link_uses_top_window_redirect(monkeypatch):
 	stub = AuthStreamlitStub()
+	components_stub = AuthComponentsStub()
 	monkeypatch.setattr(auth, "st", stub)
+	monkeypatch.setattr(auth, "components", components_stub)
 
 	auth._render_same_tab_sign_in_link("https://accounts.google.com/o/oauth2/auth?client_id=client")
 
-	markdown = stub.markdowns[-1]
-	assert 'href="https://accounts.google.com/o/oauth2/auth?client_id=client"' in markdown
-	assert 'target="_self"' in markdown
-	assert "Sign in with Google" in markdown
-	assert stub.markdown_unsafe_flags[-1] is True
+	component_html = components_stub.htmls[-1]["body"]
+	assert "window.top.location.href" in component_html
+	assert '"https://accounts.google.com/o/oauth2/auth?client_id=client"' in component_html
+	assert 'target="_top"' in component_html
+	assert components_stub.htmls[-1]["height"] == 56
 	assert not stub.link_buttons
 
 
@@ -460,6 +462,15 @@ def test_unauthenticated_gate_stops_before_scheduler_content(monkeypatch):
 
 class StopException(Exception):
 	pass
+
+
+class AuthComponentsStub:
+	def __init__(self):
+		self.htmls: list[dict] = []
+
+	def html(self, body, **kwargs):
+		self.htmls.append({"body": body, "height": kwargs.get("height")})
+		return None
 
 
 class AuthStreamlitStub:

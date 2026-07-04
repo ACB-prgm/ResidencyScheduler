@@ -653,22 +653,33 @@ def _hide_unauthenticated_navigation() -> None:
 
 
 def _render_same_tab_sign_in_link(auth_url: str) -> None:
+	auth_url_json = json.dumps(auth_url)
 	escaped_url = html.escape(auth_url, quote=True)
-	st.markdown(
+	components.html(
 		f"""
-<a href="{escaped_url}" target="_self"
-   style="
-       display:inline-block;
-       padding:0.6rem 1.2rem;
-       background:#ea5545;
-       color:white;
-       text-decoration:none;
-       border-radius:8px;
-       font-weight:600;">
+<button type="button" id="google-sign-in"
+	style="
+		display:inline-block;
+		padding:0.6rem 1.2rem;
+		background:#ea5545;
+		color:white;
+		border:0;
+		border-radius:8px;
+		font:inherit;
+		font-weight:600;
+		cursor:pointer;">
     Sign in with Google
-</a>
+</button>
+<script>
+	document.getElementById("google-sign-in").addEventListener("click", function () {{
+		window.top.location.href = {auth_url_json};
+	}});
+</script>
+<noscript>
+	<a href="{escaped_url}" target="_top">Sign in with Google</a>
+</noscript>
 """,
-		unsafe_allow_html=True,
+		height=56,
 	)
 
 
