@@ -5,3 +5,7 @@ Huntington Health Residency Scheduler is a scheduling tool for creating, reviewi
 - [Privacy Policy](privacy.md)
 - [Terms of Service](terms.md)
 - [Launch App](https://huntingtonhealthresidencyscheduler.streamlit.app)
+
+## Devloper / Owner Information
+- Name: Aaron Bastian
+- Contact: aaronbastian31@gmail.com
