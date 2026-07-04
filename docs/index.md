@@ -1,5 +1,3 @@
-# Residency Scheduler
-
 ## Purpose
 Huntington Health Residency Scheduler is a scheduling tool for creating, reviewing, and publishing residency call schedules to Google Calendar.
 
