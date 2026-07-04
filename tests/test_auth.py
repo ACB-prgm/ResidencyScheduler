@@ -209,18 +209,18 @@ def test_relaxed_oauthlib_token_scope_restores_existing_env(monkeypatch):
 	assert auth.os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] == "existing"
 
 
-def test_sign_in_link_uses_native_streamlit_link_button(monkeypatch):
+def test_sign_in_link_uses_same_tab_markdown_anchor(monkeypatch):
 	stub = AuthStreamlitStub()
 	monkeypatch.setattr(auth, "st", stub)
 
 	auth._render_same_tab_sign_in_link("https://accounts.google.com/o/oauth2/auth?client_id=client")
 
-	assert stub.link_buttons[-1] == {
-		"label": "Sign in with Google",
-		"url": "https://accounts.google.com/o/oauth2/auth?client_id=client",
-		"type": "primary",
-	}
-	assert not stub.htmls
+	markdown = stub.markdowns[-1]
+	assert 'href="https://accounts.google.com/o/oauth2/auth?client_id=client"' in markdown
+	assert 'target="_self"' in markdown
+	assert "Sign in with Google" in markdown
+	assert stub.markdown_unsafe_flags[-1] is True
+	assert not stub.link_buttons
 
 
 def test_token_encryption_round_trips_without_plaintext():
@@ -468,6 +468,7 @@ class AuthStreamlitStub:
 		self.query_params = {}
 		self.errors: list[str] = []
 		self.markdowns: list[str] = []
+		self.markdown_unsafe_flags: list[bool] = []
 		self.htmls: list[str] = []
 		self.images: list[str] = []
 		self.link_buttons: list[dict] = []
@@ -491,6 +492,7 @@ class AuthStreamlitStub:
 
 	def markdown(self, value, unsafe_allow_html=False):
 		self.markdowns.append(value)
+		self.markdown_unsafe_flags.append(unsafe_allow_html)
 
 	def html(self, value):
 		self.htmls.append(value)
