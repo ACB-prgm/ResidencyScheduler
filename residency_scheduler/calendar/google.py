@@ -261,7 +261,7 @@ def _month_bounds(period: dict[str, Any], time_zone: str = DEFAULT_TIME_ZONE) ->
 def _credentials_from_auth_session(auth_session: dict[str, Any]) -> Credentials:
 	token_payload = dict(auth_session.get("token") or {})
 	scopes = sorted(auth._normalise_scopes(token_payload.get("scopes") or auth_session.get("scopes")))
-	credentials = Credentials.from_authorized_user_info(token_payload, scopes)
+	credentials = Credentials.from_authorized_user_info(auth._google_authorized_user_info(token_payload), scopes)
 	if credentials.expired and credentials.refresh_token:
 		credentials.refresh(Request())
 		refreshed_payload = auth._credentials_to_token_payload(credentials)

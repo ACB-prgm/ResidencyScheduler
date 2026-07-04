@@ -66,6 +66,24 @@ def test_list_writable_calendars_filters_owner_and_writer():
 	]
 
 
+def test_list_writable_calendars_accepts_timezone_expiry():
+	session = auth_session()
+	session["token"]["expiry"] = "2099-01-01T00:00:00+00:00"
+	service = FakeCalendarService(
+		calendar_pages=[
+			{
+				"items": [
+					{"id": "primary", "summary": "Primary", "primary": True, "accessRole": "owner"},
+				]
+			}
+		]
+	)
+
+	calendars = google.list_writable_calendars(session, service=service)
+
+	assert calendars == [{"id": "primary", "summary": "Primary", "primary": True, "accessRole": "owner"}]
+
+
 def test_build_assignment_event_contains_schedule_metadata():
 	assignment = pd.DataFrame(
 		[

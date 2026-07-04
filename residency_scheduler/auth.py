@@ -233,7 +233,7 @@ def _streamlit_oauth_token_to_credentials_payload(token: dict[str, Any], config:
 		payload["id_token"] = token.get("id_token")
 	expiry = _streamlit_oauth_token_expiry(token)
 	if expiry is not None:
-		payload["expiry"] = expiry.isoformat()
+		payload["expiry"] = _format_google_credentials_expiry(expiry)
 	return {key: value for key, value in payload.items() if value not in (None, "")}
 
 
@@ -249,6 +249,18 @@ def _streamlit_oauth_token_expiry(token: dict[str, Any]) -> datetime | None:
 		return datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))
 	except (TypeError, ValueError):
 		return None
+
+
+def _google_authorized_user_info(token_payload: dict[str, Any]) -> dict[str, Any]:
+	payload = dict(token_payload)
+	expires_at = _parse_timestamp(payload.get("expiry"))
+	if expires_at is not None:
+		payload["expiry"] = _format_google_credentials_expiry(expires_at)
+	return payload
+
+
+def _format_google_credentials_expiry(expires_at: datetime) -> str:
+	return expires_at.astimezone(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
 
 
 def has_calendar_scopes(auth_session: dict[str, Any]) -> bool:
@@ -538,7 +550,10 @@ def _refresh_session_if_possible(session: dict[str, Any]) -> bool:
 		sign_out()
 		return False
 
-	credentials = Credentials.from_authorized_user_info(token_payload, list(_normalise_scopes(token_payload.get("scopes"))) or GOOGLE_REQUIRED_SCOPES)
+	credentials = Credentials.from_authorized_user_info(
+		_google_authorized_user_info(token_payload),
+		list(_normalise_scopes(token_payload.get("scopes"))) or GOOGLE_REQUIRED_SCOPES,
+	)
 	try:
 		credentials.refresh(Request())
 	except Exception:

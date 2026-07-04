@@ -309,7 +309,21 @@ def test_streamlit_oauth_token_converts_to_google_credentials_payload():
 	assert payload["client_id"] == "client"
 	assert payload["client_secret"] == "secret"
 	assert "https://www.googleapis.com/auth/calendar.events" in payload["scopes"]
-	assert payload["expiry"] == datetime.fromtimestamp(1783000000, tz=timezone.utc).isoformat()
+	assert payload["expiry"] == datetime.fromtimestamp(1783000000, tz=timezone.utc).replace(tzinfo=None).isoformat()
+
+
+def test_google_authorized_user_info_strips_timezone_from_expiry():
+	payload = {
+		"token": "access-token",
+		"refresh_token": "refresh-token",
+		"client_id": "client",
+		"client_secret": "secret",
+		"expiry": "2026-07-02T13:46:40+00:00",
+	}
+
+	google_payload = auth._google_authorized_user_info(payload)
+
+	assert google_payload["expiry"] == "2026-07-02T13:46:40"
 
 
 def test_token_encryption_round_trips_without_plaintext():
