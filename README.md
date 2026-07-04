@@ -78,7 +78,7 @@ Database files, local secrets, credentials, tokens, virtual environments, and bu
 
 ## Google Sign-In
 
-The app requires Google sign-in before any scheduler page loads. For local testing, use a Google OAuth Web application client with `http://localhost:8501` added as an authorized redirect URI. For Streamlit deployment, add the deployed root URL, `https://huntingtonhealthresidencyscheduler.streamlit.app`.
+The app requires Google sign-in before any scheduler page loads. For local testing, use a Google OAuth Web application client with `http://localhost:8501/component/streamlit_oauth.authorize_button` added as an authorized redirect URI. For Streamlit deployment, add `https://huntingtonhealthresidencyscheduler.streamlit.app/component/streamlit_oauth.authorize_button`.
 
 Configure deployment secrets:
 

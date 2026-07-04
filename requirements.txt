@@ -1,5 +1,6 @@
 streamlit>=1.36.0
 streamlit-calendar>=1.4.0
+streamlit-oauth==0.1.14
 pandas>=2.2.0
 ortools>=9.10.4067
 python-dateutil>=2.9.0

@@ -20,6 +20,7 @@ from google.auth.transport.requests import Request
 from google.oauth2 import id_token
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
+from streamlit_oauth import OAuth2Component, StreamlitOauthError
 
 from residency_scheduler.db import get_connection, init_db
 from residency_scheduler.ui import render_sidebar_logo
@@ -30,6 +31,9 @@ GOOGLE_CALENDAR_SCOPES = [
 	"https://www.googleapis.com/auth/calendar.events",
 ]
 GOOGLE_REQUIRED_SCOPES = GOOGLE_LOGIN_SCOPES + GOOGLE_CALENDAR_SCOPES
+GOOGLE_AUTHORIZE_ENDPOINT = "https://accounts.google.com/o/oauth2/auth"
+GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
+GOOGLE_REVOKE_ENDPOINT = "https://oauth2.googleapis.com/revoke"
 AUTH_SESSION_KEY = "google_auth_session"
 OAUTH_STATE_KEY = "google_oauth_state"
 AUTH_COOKIE_NAME = "rs_google_auth"
@@ -92,14 +96,14 @@ def require_google_auth(render_sidebar: bool = True) -> dict[str, Any]:
 		st.error("Google OAuth is not configured. Add Google client credentials before using the app.")
 		st.stop()
 
+	# Keep accepting the older root callback while local sessions migrate to the component callback.
 	code = _query_param("code")
 	state = _query_param("state")
 	if code:
 		_handle_oauth_callback(code, state, config)
 		st.stop()
 
-	auth_url = build_authorization_url(config)
-	_render_same_tab_sign_in_link(auth_url)
+	_render_streamlit_oauth_button(config)
 	st.stop()
 
 
@@ -154,6 +158,96 @@ def build_calendar_authorization_url(config: GoogleOAuthConfig) -> str:
 		GOOGLE_REQUIRED_SCOPES,
 		prompt="consent select_account",
 	)
+
+
+def _streamlit_oauth_redirect_uri(config: GoogleOAuthConfig) -> str:
+	return f"{config.redirect_uri.rstrip('/')}/component/streamlit_oauth.authorize_button"
+
+
+def _render_streamlit_oauth_button(config: GoogleOAuthConfig) -> None:
+	component = OAuth2Component(
+		config.client_id,
+		config.client_secret,
+		authorize_endpoint=GOOGLE_AUTHORIZE_ENDPOINT,
+		token_endpoint=GOOGLE_TOKEN_ENDPOINT,
+		refresh_token_endpoint=GOOGLE_TOKEN_ENDPOINT,
+		revoke_token_endpoint=GOOGLE_REVOKE_ENDPOINT,
+		token_endpoint_auth_method="client_secret_post",
+	)
+	try:
+		result = component.authorize_button(
+			"Sign in with Google",
+			redirect_uri=_streamlit_oauth_redirect_uri(config),
+			scope=" ".join(GOOGLE_REQUIRED_SCOPES),
+			key="google_sign_in",
+			extras_params={
+				"access_type": "offline",
+				"include_granted_scopes": "true",
+				"prompt": "consent select_account",
+			},
+			use_container_width=False,
+		)
+	except StreamlitOauthError as exc:
+		st.error(f"Google sign-in could not be completed. Please try again. ({exc})")
+		st.stop()
+	if result and result.get("token"):
+		_handle_streamlit_oauth_result(result, config)
+
+
+def _handle_streamlit_oauth_result(result: dict[str, Any], config: GoogleOAuthConfig) -> None:
+	token_payload = _streamlit_oauth_token_to_credentials_payload(dict(result.get("token") or {}), config)
+	id_token_value = token_payload.get("id_token")
+	if not id_token_value:
+		st.error("Google did not return an identity token. Please try again.")
+		st.stop()
+	try:
+		profile = id_token.verify_oauth2_token(str(id_token_value), Request(), config.client_id)
+	except Exception as exc:
+		st.error(f"Google identity could not be verified. Please try again. ({exc})")
+		st.stop()
+
+	allowed = is_user_allowed(profile, config)
+	persist_authenticated_user(profile, token_payload, config, allowed)
+	if not allowed:
+		st.error("This Google account is not allowed to access the scheduler.")
+		st.stop()
+
+	st.session_state[AUTH_SESSION_KEY] = _build_auth_session(profile, token_payload)
+	_create_remembered_session(str(profile["sub"]), config)
+	st.rerun()
+
+
+def _streamlit_oauth_token_to_credentials_payload(token: dict[str, Any], config: GoogleOAuthConfig) -> dict[str, Any]:
+	scope_value = token.get("scope") or token.get("scopes") or GOOGLE_REQUIRED_SCOPES
+	scopes = sorted(_normalise_scopes(scope_value)) or list(GOOGLE_REQUIRED_SCOPES)
+	payload = {
+		"token": token.get("access_token") or token.get("token"),
+		"refresh_token": token.get("refresh_token"),
+		"token_uri": GOOGLE_TOKEN_ENDPOINT,
+		"client_id": config.client_id,
+		"client_secret": config.client_secret,
+		"scopes": scopes,
+	}
+	if token.get("id_token"):
+		payload["id_token"] = token.get("id_token")
+	expiry = _streamlit_oauth_token_expiry(token)
+	if expiry is not None:
+		payload["expiry"] = expiry.isoformat()
+	return {key: value for key, value in payload.items() if value not in (None, "")}
+
+
+def _streamlit_oauth_token_expiry(token: dict[str, Any]) -> datetime | None:
+	expiry = _parse_timestamp(token.get("expiry") or token.get("expires_at"))
+	if expiry is not None:
+		return expiry
+	expires_at = token.get("expires_at")
+	if isinstance(expires_at, (int, float)):
+		return datetime.fromtimestamp(float(expires_at), tz=timezone.utc)
+	expires_in = token.get("expires_in")
+	try:
+		return datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))
+	except (TypeError, ValueError):
+		return None
 
 
 def has_calendar_scopes(auth_session: dict[str, Any]) -> bool:
@@ -649,26 +743,6 @@ def _hide_unauthenticated_navigation() -> None:
 			}
 		</style>
 		"""
-	)
-
-
-def _render_same_tab_sign_in_link(auth_url: str) -> None:
-	escaped_url = html.escape(auth_url, quote=True)
-	st.markdown(
-		f"""
-<a href="{escaped_url}" target="_top"
-   style="
-       display:inline-block;
-       padding:0.6rem 1.2rem;
-       background:#ea5545;
-       color:white;
-       text-decoration:none;
-       border-radius:8px;
-       font-weight:600;">
-    Sign in with Google
-</a>
-""",
-		unsafe_allow_html=True,
 	)
 
 

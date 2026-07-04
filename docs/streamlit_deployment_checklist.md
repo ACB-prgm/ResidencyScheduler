@@ -38,7 +38,7 @@ The deployed access policy currently permits any Google account that can complet
 - Add authorized JavaScript origin:
   - `https://huntingtonhealthresidencyscheduler.streamlit.app`
 - Add authorized redirect URI:
-  - `https://huntingtonhealthresidencyscheduler.streamlit.app`
+  - `https://huntingtonhealthresidencyscheduler.streamlit.app/component/streamlit_oauth.authorize_button`
 - OAuth consent screen scopes:
   - `openid`
   - `email`
