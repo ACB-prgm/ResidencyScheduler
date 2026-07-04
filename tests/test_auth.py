@@ -209,18 +209,68 @@ def test_relaxed_oauthlib_token_scope_restores_existing_env(monkeypatch):
 	assert auth.os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] == "existing"
 
 
-def test_sign_in_link_uses_top_target_markdown_anchor(monkeypatch):
+def test_streamlit_oauth_redirect_uri_uses_component_callback():
+	config = auth.GoogleOAuthConfig(
+		client_id="client",
+		client_secret="secret",
+		redirect_uri="https://huntingtonhealthresidencyscheduler.streamlit.app/",
+	)
+
+	assert (
+		auth._streamlit_oauth_redirect_uri(config)
+		== "https://huntingtonhealthresidencyscheduler.streamlit.app/component/streamlit_oauth.authorize_button"
+	)
+
+
+def test_streamlit_oauth_button_uses_google_component_flow(monkeypatch):
 	stub = AuthStreamlitStub()
 	monkeypatch.setattr(auth, "st", stub)
+	component = OAuth2ComponentStub(result=None)
+	monkeypatch.setattr(auth, "OAuth2Component", component.factory)
+	config = auth.GoogleOAuthConfig(
+		client_id="client",
+		client_secret="secret",
+		redirect_uri="http://localhost:8501",
+	)
 
-	auth._render_same_tab_sign_in_link("https://accounts.google.com/o/oauth2/auth?client_id=client")
+	auth._render_streamlit_oauth_button(config)
 
-	markdown = stub.markdowns[-1]
-	assert 'href="https://accounts.google.com/o/oauth2/auth?client_id=client"' in markdown
-	assert 'target="_top"' in markdown
-	assert "Sign in with Google" in markdown
-	assert stub.markdown_unsafe_flags[-1] is True
-	assert not stub.link_buttons
+	assert component.init_kwargs["authorize_endpoint"] == auth.GOOGLE_AUTHORIZE_ENDPOINT
+	assert component.init_kwargs["token_endpoint"] == auth.GOOGLE_TOKEN_ENDPOINT
+	assert component.init_kwargs["token_endpoint_auth_method"] == "client_secret_post"
+	assert component.authorize_kwargs["redirect_uri"] == "http://localhost:8501/component/streamlit_oauth.authorize_button"
+	assert component.authorize_kwargs["scope"] == " ".join(auth.GOOGLE_REQUIRED_SCOPES)
+	assert component.authorize_kwargs["extras_params"] == {
+		"access_type": "offline",
+		"include_granted_scopes": "true",
+		"prompt": "consent select_account",
+	}
+
+
+def test_streamlit_oauth_token_converts_to_google_credentials_payload():
+	config = auth.GoogleOAuthConfig(
+		client_id="client",
+		client_secret="secret",
+		redirect_uri="http://localhost:8501",
+	)
+	token = {
+		"access_token": "access-token",
+		"refresh_token": "refresh-token",
+		"id_token": "identity-token",
+		"scope": "openid email profile https://www.googleapis.com/auth/calendar.events",
+		"expires_at": 1783000000,
+	}
+
+	payload = auth._streamlit_oauth_token_to_credentials_payload(token, config)
+
+	assert payload["token"] == "access-token"
+	assert payload["refresh_token"] == "refresh-token"
+	assert payload["id_token"] == "identity-token"
+	assert payload["token_uri"] == auth.GOOGLE_TOKEN_ENDPOINT
+	assert payload["client_id"] == "client"
+	assert payload["client_secret"] == "secret"
+	assert "https://www.googleapis.com/auth/calendar.events" in payload["scopes"]
+	assert payload["expiry"] == datetime.fromtimestamp(1783000000, tz=timezone.utc).isoformat()
 
 
 def test_token_encryption_round_trips_without_plaintext():
@@ -460,6 +510,23 @@ def test_unauthenticated_gate_stops_before_scheduler_content(monkeypatch):
 
 class StopException(Exception):
 	pass
+
+
+class OAuth2ComponentStub:
+	def __init__(self, result):
+		self.result = result
+		self.init_args = None
+		self.init_kwargs = None
+		self.authorize_kwargs = None
+
+	def factory(self, *args, **kwargs):
+		self.init_args = args
+		self.init_kwargs = kwargs
+		return self
+
+	def authorize_button(self, name, redirect_uri, scope, **kwargs):
+		self.authorize_kwargs = {"name": name, "redirect_uri": redirect_uri, "scope": scope, **kwargs}
+		return self.result
 
 
 class AuthStreamlitStub:
