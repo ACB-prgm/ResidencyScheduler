@@ -20,11 +20,9 @@ client_id = "..."
 client_secret = "..."
 redirect_uri = "https://huntingtonhealthresidencyscheduler.streamlit.app"
 token_encryption_key = "base64-url-safe-fernet-key"
-allowed_domains = []
-allowed_emails = []
 ```
 
-The deployed access policy currently permits any Google account that can complete OAuth. To restrict access later, set `allowed_domains` or `allowed_emails`.
+The deployed app can be public, but scheduler access is limited after Google sign-in to emails listed in the Residents table, plus `aaronbastian31@gmail.com`.
 
 ## Google Cloud Console
 

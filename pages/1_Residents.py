@@ -57,7 +57,7 @@ render_user_guide(
 	- **Name:** the resident name shown in dropdowns, schedules, and calendar events.
 	- **PGY:** postgraduate year level from 1 through 5. Higher PGY levels are protected from surplus total and weekend shifts when feasible.
 	- **Min/Max:** optional monthly shift bounds. Min asks the solver to reach at least that many shifts; Max prevents assignments above the limit.
-	- **Email:** optional contact reference.
+	- **Email:** contact reference and app access control. Only residents with email addresses listed here can sign in and use the application.
 	- **Color/Swatch:** the color used for that resident in the schedule calendar. Colors must be unique.
 	- **Active:** inactive residents are kept for history but are not used for new schedules.
 

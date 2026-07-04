@@ -42,14 +42,21 @@ def isolated_db(tmp_path, monkeypatch):
 def authenticated_session() -> dict:
 	return {
 		"google_sub": "test-google-sub",
-		"email": "tester@example.org",
+		"email": "ada@example.com",
 		"name": "Test User",
 		"picture": "",
-		"profile": {"sub": "test-google-sub", "email": "tester@example.org"},
+		"profile": {"sub": "test-google-sub", "email": "ada@example.com"},
 		"token": {},
 		"scopes": ["openid", "email", "profile", *GOOGLE_CALENDAR_SCOPES],
 		"expires_at": "2099-01-01T00:00:00+00:00",
 	}
+
+
+def unauthorized_session() -> dict:
+	session = authenticated_session()
+	session["email"] = "outsider@example.com"
+	session["profile"] = {"sub": "test-google-sub", "email": "outsider@example.com"}
+	return session
 
 
 @pytest.mark.parametrize(
@@ -92,6 +99,17 @@ def test_unauthenticated_direct_page_shows_sign_in_gate(isolated_db):
 	assert len(app.slider) == 0
 
 
+def test_authenticated_non_resident_email_is_blocked(isolated_db):
+	app = AppTest.from_file(str(ROOT / "pages/1_Residents.py"))
+	app.session_state[AUTH_SESSION_KEY] = unauthorized_session()
+	app.run(timeout=5)
+
+	assert not app.exception
+	assert app.error
+	assert "not authorized to access the scheduler" in app.error[0].value
+	assert "Save residents" not in [button.label for button in app.button]
+
+
 def test_authenticated_sidebar_shows_logo_and_sign_out(isolated_db):
 	app = AppTest.from_file(str(ROOT / "pages/1_Residents.py"))
 	app.session_state[AUTH_SESSION_KEY] = authenticated_session()
@@ -130,6 +148,15 @@ def test_each_page_renders_user_guide(isolated_db, script_path: str, guide_label
 
 	assert not app.exception
 	assert guide_label in [item.label for item in app.expander]
+
+
+def test_residents_guide_mentions_email_access_control(isolated_db):
+	app = AppTest.from_file(str(ROOT / "pages/1_Residents.py"))
+	app.session_state[AUTH_SESSION_KEY] = authenticated_session()
+	app.run(timeout=5)
+
+	assert not app.exception
+	assert any("Only residents with email addresses listed here can sign in" in item.value for item in app.markdown)
 
 
 def test_home_help_is_consolidated_and_month_settings_is_collapsed_section(isolated_db):
