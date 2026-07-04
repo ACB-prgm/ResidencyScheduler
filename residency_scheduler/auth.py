@@ -653,28 +653,7 @@ def _hide_unauthenticated_navigation() -> None:
 
 
 def _render_same_tab_sign_in_link(auth_url: str) -> None:
-	st.html(
-		f"""
-		<a
-			href="{html.escape(auth_url, quote=True)}"
-			target="_top"
-			style="
-				display: inline-flex;
-				align-items: center;
-				justify-content: center;
-				min-height: 2.5rem;
-				padding: 0.5rem 1rem;
-				border-radius: 0.5rem;
-				background: #ff4b4b;
-				color: white;
-				font-weight: 600;
-				text-decoration: none;
-			"
-		>
-			Sign in with Google
-		</a>
-		"""
-	)
+	st.link_button("Sign in with Google", auth_url, type="primary")
 
 
 def _streamlit_google_config() -> dict[str, Any]:
