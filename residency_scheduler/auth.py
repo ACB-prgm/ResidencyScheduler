@@ -8,7 +8,7 @@ import html
 import json
 import os
 import secrets
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlparse
@@ -34,6 +34,7 @@ GOOGLE_REQUIRED_SCOPES = GOOGLE_LOGIN_SCOPES + GOOGLE_CALENDAR_SCOPES
 GOOGLE_AUTHORIZE_ENDPOINT = "https://accounts.google.com/o/oauth2/auth"
 GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
 GOOGLE_REVOKE_ENDPOINT = "https://oauth2.googleapis.com/revoke"
+ADMIN_EMAIL = "aaronbastian31@gmail.com"
 AUTH_SESSION_KEY = "google_auth_session"
 OAUTH_STATE_KEY = "google_oauth_state"
 AUTH_COOKIE_NAME = "rs_google_auth"
@@ -49,8 +50,6 @@ class GoogleOAuthConfig:
 	client_secret: str
 	redirect_uri: str
 	token_encryption_key: str | None = None
-	allowed_domains: tuple[str, ...] = field(default_factory=tuple)
-	allowed_emails: tuple[str, ...] = field(default_factory=tuple)
 
 	def client_config(self) -> dict[str, Any]:
 		return {
@@ -66,18 +65,22 @@ class GoogleOAuthConfig:
 
 def require_google_auth(render_sidebar: bool = True) -> dict[str, Any]:
 	"""Require a valid Google sign-in before rendering app content."""
+	config = load_google_oauth_config()
 	session = st.session_state.get(AUTH_SESSION_KEY)
 	if _session_auth_is_valid(session):
+		if not _session_user_is_allowed(session):
+			_render_access_denied(str(session.get("email") or ""), config)
 		if render_sidebar:
 			_render_signed_in_sidebar(session)
 		return session
 
 	if session and _refresh_session_if_possible(session):
+		if not _session_user_is_allowed(st.session_state[AUTH_SESSION_KEY]):
+			_render_access_denied(str(st.session_state[AUTH_SESSION_KEY].get("email") or ""), config)
 		if render_sidebar:
 			_render_signed_in_sidebar(st.session_state[AUTH_SESSION_KEY])
 		return st.session_state[AUTH_SESSION_KEY]
 
-	config = load_google_oauth_config()
 	if config is not None:
 		remembered_session = _restore_session_from_cookie(config)
 		if remembered_session is not None:
@@ -143,8 +146,6 @@ def load_google_oauth_config() -> GoogleOAuthConfig | None:
 			secret_config.get("token_encryption_key"),
 			os.environ.get("GOOGLE_TOKEN_ENCRYPTION_KEY"),
 		),
-		allowed_domains=_normalise_sequence(secret_config.get("allowed_domains")),
-		allowed_emails=_normalise_sequence(secret_config.get("allowed_emails")),
 	)
 
 
@@ -268,14 +269,57 @@ def _build_authorization_url(config: GoogleOAuthConfig, scopes: list[str], promp
 	return auth_url
 
 
-def is_user_allowed(profile: dict[str, Any], config: GoogleOAuthConfig) -> bool:
-	email = str(profile.get("email") or "").strip().lower()
-	domain = email.rsplit("@", maxsplit=1)[1] if "@" in email else ""
-	if not config.allowed_domains and not config.allowed_emails:
+def is_user_allowed(profile: dict[str, Any], config: GoogleOAuthConfig | None = None) -> bool:
+	email = _normalise_email(profile.get("email"))
+	if not email:
+		return False
+	if email == ADMIN_EMAIL:
 		return True
-	if email in config.allowed_emails:
-		return True
-	return domain in config.allowed_domains
+	return email in _resident_access_emails()
+
+
+def _session_user_is_allowed(session: dict[str, Any]) -> bool:
+	email = _normalise_email(session.get("email") or (session.get("profile") or {}).get("email"))
+	return is_user_allowed({"email": email})
+
+
+def _resident_access_emails() -> set[str]:
+	try:
+		init_db()
+		with get_connection() as conn:
+			rows = conn.execute(
+				"""
+				SELECT email
+				FROM residents
+				WHERE email IS NOT NULL
+				  AND TRIM(email) <> ''
+				"""
+			).fetchall()
+	except Exception:
+		return set()
+	return {_normalise_email(row["email"]) for row in rows if _normalise_email(row["email"])}
+
+
+def _normalise_email(value: Any) -> str:
+	return str(value or "").strip().casefold()
+
+
+def _render_access_denied(email: str, config: GoogleOAuthConfig | None = None) -> None:
+	if config is not None:
+		_delete_remembered_session(config)
+	_clear_remember_cookie()
+	st.session_state.pop(AUTH_SESSION_KEY, None)
+	_hide_unauthenticated_navigation()
+	with st.sidebar:
+		render_sidebar_logo(st)
+	st.title("Residency Scheduler")
+	st.error(
+		f"{email or 'This Google account'} is not authorized to access the scheduler. "
+		"Ask an administrator to add that email to the Residents page."
+	)
+	if st.button("Try another Google account"):
+		st.rerun()
+	st.stop()
 
 
 def encrypt_token_payload(token_payload: dict[str, Any], token_encryption_key: str) -> str:
@@ -503,8 +547,12 @@ def _refresh_session_if_possible(session: dict[str, Any]) -> bool:
 
 	refreshed_payload = _credentials_to_token_payload(credentials)
 	profile = dict(session.get("profile") or {})
+	allowed = is_user_allowed(profile, config)
+	persist_authenticated_user(profile, refreshed_payload, config, allowed)
+	if not allowed:
+		sign_out()
+		return False
 	st.session_state[AUTH_SESSION_KEY] = _build_auth_session(profile, refreshed_payload)
-	persist_authenticated_user(profile, refreshed_payload, config, True)
 	return True
 
 
@@ -530,9 +578,6 @@ def _restore_session_from_cookie(config: GoogleOAuthConfig) -> dict[str, Any] | 
 		return None
 	if row is None:
 		return None
-	if int(row["allowed"]) != 1:
-		_delete_remembered_session(config)
-		return None
 	expires_at = _parse_timestamp(row["expires_at"])
 	if expires_at is None or expires_at <= datetime.now(timezone.utc):
 		_delete_remembered_session(config)
@@ -551,6 +596,9 @@ def _restore_session_from_cookie(config: GoogleOAuthConfig) -> dict[str, Any] | 
 		"name": str(row["name"] or ""),
 		"picture": str(row["picture_url"] or ""),
 	}
+	if not is_user_allowed(profile, config):
+		_delete_remembered_session(config)
+		return None
 	session = _build_auth_session(profile, token_payload)
 	if _session_auth_is_valid(session):
 		_mark_remembered_session_used(session_hash)
@@ -776,16 +824,6 @@ def _current_app_root_url() -> str | None:
 	if not parsed.scheme or not parsed.netloc:
 		return None
 	return f"{parsed.scheme}://{parsed.netloc}"
-
-
-def _normalise_sequence(value: Any) -> tuple[str, ...]:
-	if not value:
-		return ()
-	if isinstance(value, str):
-		items = [item.strip() for item in value.split(",")]
-	else:
-		items = [str(item).strip() for item in value]
-	return tuple(item.lower() for item in items if item)
 
 
 def _normalise_scopes(value: Any) -> set[str]:

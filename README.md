@@ -88,11 +88,11 @@ client_id = "..."
 client_secret = "..."
 redirect_uri = "https://huntingtonhealthresidencyscheduler.streamlit.app"
 token_encryption_key = "base64-url-safe-fernet-key"
-allowed_domains = []
-allowed_emails = []
 ```
 
 For local development, copy the relevant values from the ignored Google client JSON into `.streamlit/secrets.toml` so the local app uses the same `st.secrets` interface as Streamlit Cloud. Authenticated user details are cached in the Streamlit session so page navigation does not reread Google or Neon. The initial sign-in requests Calendar access so Generate Schedule can publish to a selected writable Google Calendar. When `token_encryption_key` is configured, OAuth credentials are stored encrypted in the primary database and the browser keeps an opaque remember-session cookie. New app sessions restore the encrypted token, refresh it when needed, and only require Google sign-in again when the stored token cannot be refreshed.
+
+Access is limited to Google accounts whose email appears in the Residents table, plus the administrator account `aaronbastian31@gmail.com`. Residents without email addresses cannot sign in.
 
 Add these Google Calendar API scopes to the OAuth consent screen:
 

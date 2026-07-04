@@ -82,18 +82,57 @@ def test_current_app_root_url_drops_page_path_and_query(monkeypatch):
 	assert auth._current_app_root_url() == "http://localhost:8501"
 
 
-def test_access_control_permits_configured_email_or_domain():
+def test_access_control_permits_admin_without_residents(isolated_auth_db):
 	config = auth.GoogleOAuthConfig(
 		client_id="client",
 		client_secret="secret",
 		redirect_uri="http://localhost:8501",
-		allowed_domains=("example.org",),
-		allowed_emails=("allowed@example.com",),
 	)
 
-	assert auth.is_user_allowed({"email": "allowed@example.com"}, config)
-	assert auth.is_user_allowed({"email": "someone@example.org"}, config)
+	assert auth.is_user_allowed({"email": "AaronBastian31@gmail.com"}, config)
+
+
+def test_access_control_permits_resident_email_case_insensitive(isolated_auth_db):
+	_insert_resident_email("Ada@Example.com", active=1)
+	config = auth.GoogleOAuthConfig(
+		client_id="client",
+		client_secret="secret",
+		redirect_uri="http://localhost:8501",
+	)
+
+	assert auth.is_user_allowed({"email": "ada@example.COM"}, config)
+
+
+def test_access_control_permits_inactive_resident_email(isolated_auth_db):
+	_insert_resident_email("inactive@example.com", active=0)
+	config = auth.GoogleOAuthConfig(
+		client_id="client",
+		client_secret="secret",
+		redirect_uri="http://localhost:8501",
+	)
+
+	assert auth.is_user_allowed({"email": "inactive@example.com"}, config)
+
+
+def test_access_control_rejects_non_resident_email(isolated_auth_db):
+	config = auth.GoogleOAuthConfig(
+		client_id="client",
+		client_secret="secret",
+		redirect_uri="http://localhost:8501",
+	)
+
 	assert not auth.is_user_allowed({"email": "blocked@example.net"}, config)
+
+
+def test_access_control_rejects_blank_email(isolated_auth_db):
+	config = auth.GoogleOAuthConfig(
+		client_id="client",
+		client_secret="secret",
+		redirect_uri="http://localhost:8501",
+	)
+
+	assert not auth.is_user_allowed({"email": ""}, config)
+	assert not auth.is_user_allowed({}, config)
 
 
 def test_signed_oauth_state_validates_without_session_state():
@@ -394,6 +433,7 @@ def test_create_remembered_session_works_without_explicit_token_key(isolated_aut
 
 
 def test_restore_session_from_cookie_uses_encrypted_stored_token(isolated_auth_db, monkeypatch):
+	_insert_resident_email("user@example.org")
 	key = Fernet.generate_key().decode("utf-8")
 	config = auth.GoogleOAuthConfig(
 		client_id="client",
@@ -424,6 +464,7 @@ def test_restore_session_from_cookie_uses_encrypted_stored_token(isolated_auth_d
 
 
 def test_restore_session_from_cookie_attempts_refresh_for_expired_token(isolated_auth_db, monkeypatch):
+	_insert_resident_email("user@example.org")
 	key = Fernet.generate_key().decode("utf-8")
 	config = auth.GoogleOAuthConfig(
 		client_id="client",
@@ -463,6 +504,35 @@ def test_restore_session_from_cookie_attempts_refresh_for_expired_token(isolated
 
 	assert restored is not None
 	assert restored["token"]["token"] == "refreshed-access-token"
+
+
+def test_restore_session_from_cookie_rechecks_current_resident_access(isolated_auth_db, monkeypatch):
+	key = Fernet.generate_key().decode("utf-8")
+	config = auth.GoogleOAuthConfig(
+		client_id="client",
+		client_secret="secret",
+		redirect_uri="http://localhost:8501",
+		token_encryption_key=key,
+	)
+	stub = AuthStreamlitStub()
+	monkeypatch.setattr(auth, "st", stub)
+	monkeypatch.setattr(auth.secrets, "token_urlsafe", lambda _size: "remember-cookie-value")
+	profile = {"sub": "google-sub-1", "email": "removed@example.org", "name": "Removed User", "picture": ""}
+	token_payload = {
+		"token": "access-token",
+		"refresh_token": "refresh-token",
+		"expiry": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+		"scopes": ["openid", "email", "profile", *auth.GOOGLE_CALENDAR_SCOPES],
+	}
+	auth.persist_authenticated_user(profile, token_payload, config, allowed=True)
+	auth._create_remembered_session("google-sub-1", config)
+	monkeypatch.setattr(auth, "_remember_cookie_value", lambda: "remember-cookie-value")
+
+	restored = auth._restore_session_from_cookie(config)
+
+	assert restored is None
+	with get_connection() as conn:
+		assert conn.execute("SELECT COUNT(*) AS count FROM google_auth_sessions").fetchone()["count"] == 0
 
 
 def test_session_auth_valid_uses_local_session_payload_without_storage():
@@ -529,6 +599,17 @@ class OAuth2ComponentStub:
 		return self.result
 
 
+def _insert_resident_email(email: str, active: int = 1) -> None:
+	with get_connection() as conn:
+		conn.execute(
+			"""
+			INSERT INTO residents (name, email, max_shifts, min_shifts, weight, active)
+			VALUES (?, ?, ?, ?, ?, ?)
+			""",
+			(f"Resident {email}", email, 10, None, 1, active),
+		)
+
+
 class AuthStreamlitStub:
 	def __init__(self):
 		self.session_state = {}
@@ -570,6 +651,9 @@ class AuthStreamlitStub:
 	def link_button(self, label, url, **kwargs):
 		self.link_buttons.append({"label": label, "url": url, "type": kwargs.get("type")})
 		return None
+
+	def button(self, _label, **_kwargs):
+		return False
 
 	def stop(self):
 		self.stopped = True
