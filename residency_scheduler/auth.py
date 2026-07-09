@@ -10,6 +10,7 @@ import os
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -42,6 +43,7 @@ PENDING_REMEMBER_COOKIE_KEY = "pending_google_remember_cookie"
 EXPIRY_REFRESH_WINDOW = timedelta(minutes=5)
 OAUTH_STATE_TTL = timedelta(hours=1)
 REMEMBER_SESSION_TTL = timedelta(days=30)
+GOOGLE_SIGN_IN_GUIDE_IMAGE_PATH = Path(__file__).resolve().parents[1] / "assets" / "google_sign_in_instructions.png"
 
 
 @dataclass(frozen=True)
@@ -107,6 +109,7 @@ def require_google_auth(render_sidebar: bool = True) -> dict[str, Any]:
 		st.stop()
 
 	_render_streamlit_oauth_button(config)
+	_render_google_sign_in_user_guide()
 	st.stop()
 
 
@@ -193,6 +196,26 @@ def _render_streamlit_oauth_button(config: GoogleOAuthConfig) -> None:
 		st.stop()
 	if result and result.get("token"):
 		_handle_streamlit_oauth_result(result, config)
+
+
+def _render_google_sign_in_user_guide() -> None:
+	with st.expander("User Guide: Google Sign-In", expanded=True):
+		st.markdown(
+			"""
+This app has not yet completed Google verification, so Google may show an extra warning during sign-in.
+
+1. Click **Sign in with Google**.
+2. Select the Google account associated with the residency call calendar.
+3. Click **Advanced**, then [Go to huntingtonhealthresidencyscheduler.streamlit.app (unsafe)](https://accounts.google.com/#).
+4. Allow all requested scopes and click **Continue**.
+"""
+		)
+		if GOOGLE_SIGN_IN_GUIDE_IMAGE_PATH.exists():
+			st.image(
+				str(GOOGLE_SIGN_IN_GUIDE_IMAGE_PATH),
+				caption="Google unverified app warning instructions",
+				width="stretch",
+			)
 
 
 def _handle_streamlit_oauth_result(result: dict[str, Any], config: GoogleOAuthConfig) -> None:

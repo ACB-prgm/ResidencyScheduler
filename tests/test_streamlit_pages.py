@@ -87,6 +87,8 @@ def test_unauthenticated_home_shows_sign_in_gate(isolated_db):
 	assert len(app.sidebar.children) >= 1
 	assert not app.error
 	assert len(app.selectbox) == 0
+	assert "User Guide: Google Sign-In" in [item.label for item in app.expander]
+	assert any("Go to huntingtonhealthresidencyscheduler.streamlit.app (unsafe)" in item.value for item in app.markdown)
 
 
 def test_unauthenticated_direct_page_shows_sign_in_gate(isolated_db):
@@ -97,6 +99,7 @@ def test_unauthenticated_direct_page_shows_sign_in_gate(isolated_db):
 	assert len(app.sidebar.children) >= 1
 	assert not app.error
 	assert len(app.slider) == 0
+	assert "User Guide: Google Sign-In" in [item.label for item in app.expander]
 
 
 def test_authenticated_non_resident_email_is_blocked(isolated_db):
