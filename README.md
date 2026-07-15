@@ -78,11 +78,30 @@ Database files, local secrets, credentials, tokens, virtual environments, and bu
 
 ## Google Sign-In
 
-The app requires Google sign-in before any scheduler page loads. For local testing, use a Google OAuth Web application client with `http://localhost:8501/component/streamlit_oauth.authorize_button` added as an authorized redirect URI. For Streamlit deployment, add `https://huntingtonhealthresidencyscheduler.streamlit.app/component/streamlit_oauth.authorize_button`.
+The app requires Google sign-in before any scheduler page loads. Streamlit OIDC keeps the user's signed identity for up to 30 days, while Calendar access and refresh tokens are stored encrypted in Neon. Add both local callbacks to the Google OAuth Web application client:
+
+```text
+http://localhost:8501/oauth2callback
+http://localhost:8501/component/streamlit_oauth.authorize_button
+```
+
+For Streamlit deployment, add both production callbacks:
+
+```text
+https://huntingtonhealthresidencyscheduler.streamlit.app/oauth2callback
+https://huntingtonhealthresidencyscheduler.streamlit.app/component/streamlit_oauth.authorize_button
+```
 
 Configure deployment secrets:
 
 ```toml
+[auth]
+redirect_uri = "https://huntingtonhealthresidencyscheduler.streamlit.app/oauth2callback"
+cookie_secret = "strong-random-cookie-signing-secret"
+client_id = "..."
+client_secret = "..."
+server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
+
 [google]
 client_id = "..."
 client_secret = "..."
@@ -90,7 +109,7 @@ redirect_uri = "https://huntingtonhealthresidencyscheduler.streamlit.app"
 token_encryption_key = "base64-url-safe-fernet-key"
 ```
 
-For local development, copy the relevant values from the ignored Google client JSON into `.streamlit/secrets.toml` so the local app uses the same `st.secrets` interface as Streamlit Cloud. Authenticated user details are cached in the Streamlit session so page navigation does not reread Google or Neon. The initial sign-in requests Calendar access so Generate Schedule can publish to a selected writable Google Calendar. When `token_encryption_key` is configured, OAuth credentials are stored encrypted in the primary database and the browser keeps an opaque remember-session cookie. New app sessions restore the encrypted token, refresh it when needed, and only require Google sign-in again when the stored token cannot be refreshed.
+For local development, use the same sections with `auth.redirect_uri = "http://localhost:8501/oauth2callback"` and `google.redirect_uri = "http://localhost:8501"`. Authenticated user details are cached in the Streamlit session, and roster authorization is served from an in-memory snapshot rather than querying Neon on every rerun. New browser sessions use Streamlit's OIDC cookie to identify the user, restore the encrypted Calendar token from Neon, refresh it when needed, and request Calendar authorization only when no usable refresh token remains.
 
 Access is limited to Google accounts whose email appears in the Residents table, plus the administrator account `aaronbastian31@gmail.com`. Residents without email addresses cannot sign in.
 

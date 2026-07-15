@@ -4,7 +4,6 @@ import base64
 from contextlib import contextmanager
 import hashlib
 import hmac
-import html
 import json
 import os
 import secrets
@@ -15,15 +14,16 @@ from typing import Any
 from urllib.parse import urlparse
 
 import streamlit as st
-import streamlit.components.v1 as components
 from cryptography.fernet import Fernet, InvalidToken
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2 import id_token
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from streamlit_oauth import OAuth2Component, StreamlitOauthError
 
-from residency_scheduler.db import get_connection, init_db
+from residency_scheduler.cache import get_cached_resident_access_snapshot
+from residency_scheduler.db import get_connection
 from residency_scheduler.ui import render_sidebar_logo
 
 GOOGLE_LOGIN_SCOPES = ["openid", "email", "profile"]
@@ -38,11 +38,9 @@ GOOGLE_REVOKE_ENDPOINT = "https://oauth2.googleapis.com/revoke"
 ADMIN_EMAIL = "aaronbastian31@gmail.com"
 AUTH_SESSION_KEY = "google_auth_session"
 OAUTH_STATE_KEY = "google_oauth_state"
-AUTH_COOKIE_NAME = "rs_google_auth"
-PENDING_REMEMBER_COOKIE_KEY = "pending_google_remember_cookie"
+AUTHORIZATION_CACHE_KEY = "google_authorization_cache"
 EXPIRY_REFRESH_WINDOW = timedelta(minutes=5)
 OAUTH_STATE_TTL = timedelta(hours=1)
-REMEMBER_SESSION_TTL = timedelta(days=30)
 GOOGLE_SIGN_IN_GUIDE_IMAGE_PATH = Path(__file__).resolve().parents[1] / "assets" / "google_sign_in_instructions.png"
 
 
@@ -66,60 +64,131 @@ class GoogleOAuthConfig:
 
 
 def require_google_auth(render_sidebar: bool = True) -> dict[str, Any]:
-	"""Require a valid Google sign-in before rendering app content."""
+	"""Require persistent OIDC identity and usable Google Calendar credentials."""
 	config = load_google_oauth_config()
+	profile = _current_identity_profile()
+	if profile is None:
+		_render_identity_login()
+
+	if not is_user_allowed(profile, config):
+		_render_access_denied(str(profile.get("email") or ""))
+
 	session = st.session_state.get(AUTH_SESSION_KEY)
-	if _session_auth_is_valid(session):
-		if not _session_user_is_allowed(session):
-			_render_access_denied(str(session.get("email") or ""), config)
+	if _session_matches_profile(session, profile) and _session_auth_is_valid(session):
 		if render_sidebar:
 			_render_signed_in_sidebar(session)
 		return session
 
-	if session and _refresh_session_if_possible(session):
-		if not _session_user_is_allowed(st.session_state[AUTH_SESSION_KEY]):
-			_render_access_denied(str(st.session_state[AUTH_SESSION_KEY].get("email") or ""), config)
+	if _session_matches_profile(session, profile) and _refresh_session_if_possible(session):
 		if render_sidebar:
 			_render_signed_in_sidebar(st.session_state[AUTH_SESSION_KEY])
 		return st.session_state[AUTH_SESSION_KEY]
 
 	if config is not None:
-		remembered_session = _restore_session_from_cookie(config)
-		if remembered_session is not None:
-			st.session_state[AUTH_SESSION_KEY] = remembered_session
+		stored_session = _restore_session_for_profile(profile, config)
+		if stored_session is not None:
+			st.session_state[AUTH_SESSION_KEY] = stored_session
 			if render_sidebar:
-				_render_signed_in_sidebar(remembered_session)
-			return remembered_session
-
-	_hide_unauthenticated_navigation()
-	with st.sidebar:
-		render_sidebar_logo(st)
-	st.title("Residency Scheduler")
-	st.caption("Sign in with Google to continue.")
+				_render_signed_in_sidebar(stored_session)
+			return stored_session
 
 	if config is None:
-		st.error("Google OAuth is not configured. Add Google client credentials before using the app.")
+		_render_auth_shell()
+		st.error("Google Calendar OAuth is not configured. Add Google client credentials before using the app.")
 		st.stop()
 
-	# Keep accepting the older root callback while local sessions migrate to the component callback.
-	code = _query_param("code")
-	state = _query_param("state")
-	if code:
-		_handle_oauth_callback(code, state, config)
-		st.stop()
-
-	_render_streamlit_oauth_button(config)
-	_render_google_sign_in_user_guide()
+	st.session_state.pop(AUTH_SESSION_KEY, None)
+	_render_auth_shell()
+	st.caption("One-time Calendar authorization is required before entering the scheduler.")
+	_render_calendar_authorization_button(config, profile)
+	_render_google_calendar_user_guide()
 	st.stop()
 
 
 def sign_out() -> None:
-	config = load_google_oauth_config()
-	if config is not None:
-		_delete_remembered_session(config)
-	_clear_remember_cookie()
 	st.session_state.pop(AUTH_SESSION_KEY, None)
 	st.session_state.pop(OAUTH_STATE_KEY, None)
+	st.session_state.pop(AUTHORIZATION_CACHE_KEY, None)
+	try:
+		st.logout()
+	except Exception:
+		st.rerun()
+
+
+def get_current_auth_session() -> dict[str, Any]:
+	"""Return the session established by the app-level auth gate."""
+	session = st.session_state.get(AUTH_SESSION_KEY)
+	if not isinstance(session, dict):
+		raise RuntimeError("Google authentication has not been established for this session.")
+	return session
+
+
+def current_user_is_allowed() -> bool:
+	profile = _current_identity_profile()
+	return profile is not None and is_user_allowed(profile)
+
+
+def render_authenticated_sidebar(session: dict[str, Any]) -> None:
+	_render_signed_in_sidebar(session)
+
+
+def _current_identity_profile() -> dict[str, Any] | None:
+	"""Read Streamlit's OIDC identity, with live-session fallback for testability."""
+	try:
+		user = st.user
+		if bool(getattr(user, "is_logged_in", False)):
+			profile = {
+				"sub": _claim(user, "sub"),
+				"email": _claim(user, "email"),
+				"name": _claim(user, "name"),
+				"picture": _claim(user, "picture"),
+			}
+			if profile["sub"] and profile["email"]:
+				return profile
+	except Exception:
+		pass
+
+	session = st.session_state.get(AUTH_SESSION_KEY)
+	if isinstance(session, dict) and isinstance(session.get("profile"), dict):
+		return dict(session["profile"])
+	return None
+
+
+def _claim(user: Any, key: str) -> str:
+	try:
+		value = user.get(key, "")
+	except AttributeError:
+		value = getattr(user, key, "")
+	return str(value or "")
+
+
+def _session_matches_profile(session: Any, profile: dict[str, Any]) -> bool:
+	return isinstance(session, dict) and str(session.get("google_sub") or "") == str(profile.get("sub") or "")
+
+
+def _render_auth_shell() -> None:
+	_hide_unauthenticated_navigation()
+	with st.sidebar:
+		render_sidebar_logo(st)
+	st.title("Residency Scheduler")
+
+
+def _render_identity_login() -> None:
+	_render_auth_shell()
+	st.caption("Sign in with Google to continue.")
+	if st.button("Sign in with Google", type="primary"):
+		st.login()
+	with st.expander("User Guide: Google Sign-In", expanded=True):
+		st.markdown(
+			"""
+1. Click **Sign in with Google**.
+2. Select the Google account associated with the residency call calendar.
+3. After identity is confirmed, the app will restore existing Calendar access or guide you through a one-time Calendar authorization.
+
+Only the administrator and Google accounts matching an email on the Residents page can enter the scheduler.
+"""
+		)
+	st.stop()
 
 
 def load_google_oauth_config() -> GoogleOAuthConfig | None:
@@ -153,14 +222,14 @@ def load_google_oauth_config() -> GoogleOAuthConfig | None:
 
 
 def build_authorization_url(config: GoogleOAuthConfig) -> str:
-	return _build_authorization_url(config, GOOGLE_REQUIRED_SCOPES, prompt="consent select_account")
+	return _build_authorization_url(config, GOOGLE_REQUIRED_SCOPES, prompt="consent")
 
 
 def build_calendar_authorization_url(config: GoogleOAuthConfig) -> str:
 	return _build_authorization_url(
 		config,
 		GOOGLE_REQUIRED_SCOPES,
-		prompt="consent select_account",
+		prompt="consent",
 	)
 
 
@@ -168,7 +237,7 @@ def _streamlit_oauth_redirect_uri(config: GoogleOAuthConfig) -> str:
 	return f"{config.redirect_uri.rstrip('/')}/component/streamlit_oauth.authorize_button"
 
 
-def _render_streamlit_oauth_button(config: GoogleOAuthConfig) -> None:
+def _render_calendar_authorization_button(config: GoogleOAuthConfig, oidc_profile: dict[str, Any]) -> None:
 	component = OAuth2Component(
 		config.client_id,
 		config.client_secret,
@@ -180,31 +249,31 @@ def _render_streamlit_oauth_button(config: GoogleOAuthConfig) -> None:
 	)
 	try:
 		result = component.authorize_button(
-			"Sign in with Google",
+			"Authorize Google Calendar",
 			redirect_uri=_streamlit_oauth_redirect_uri(config),
 			scope=" ".join(GOOGLE_REQUIRED_SCOPES),
-			key="google_sign_in",
+			key="google_calendar_authorization",
 			extras_params={
 				"access_type": "offline",
 				"include_granted_scopes": "true",
-				"prompt": "consent select_account",
+				"prompt": "consent",
 			},
 			use_container_width=False,
 		)
 	except StreamlitOauthError as exc:
-		st.error(f"Google sign-in could not be completed. Please try again. ({exc})")
+		st.error(f"Google Calendar authorization could not be completed. Please try again. ({exc})")
 		st.stop()
 	if result and result.get("token"):
-		_handle_streamlit_oauth_result(result, config)
+		_handle_streamlit_oauth_result(result, config, oidc_profile)
 
 
-def _render_google_sign_in_user_guide() -> None:
-	with st.expander("User Guide: Google Sign-In", expanded=True):
+def _render_google_calendar_user_guide() -> None:
+	with st.expander("User Guide: Google Calendar Authorization", expanded=True):
 		st.markdown(
 			"""
-This app has not yet completed Google verification, so Google may show an extra warning during sign-in.
+This app has not yet completed Google verification, so Google may show an extra warning when Calendar access is authorized.
 
-1. Click **Sign in with Google**.
+1. Click **Authorize Google Calendar**.
 2. Select the Google account associated with the residency call calendar.
 3. Click **Advanced**, then [Go to huntingtonhealthresidencyscheduler.streamlit.app (unsafe)](https://accounts.google.com/#).
 4. Allow all requested scopes and click **Continue**.
@@ -218,7 +287,11 @@ This app has not yet completed Google verification, so Google may show an extra 
 			)
 
 
-def _handle_streamlit_oauth_result(result: dict[str, Any], config: GoogleOAuthConfig) -> None:
+def _handle_streamlit_oauth_result(
+	result: dict[str, Any],
+	config: GoogleOAuthConfig,
+	oidc_profile: dict[str, Any],
+) -> None:
 	token_payload = _streamlit_oauth_token_to_credentials_payload(dict(result.get("token") or {}), config)
 	id_token_value = token_payload.get("id_token")
 	if not id_token_value:
@@ -229,15 +302,17 @@ def _handle_streamlit_oauth_result(result: dict[str, Any], config: GoogleOAuthCo
 	except Exception as exc:
 		st.error(f"Google identity could not be verified. Please try again. ({exc})")
 		st.stop()
+	if str(profile.get("sub") or "") != str(oidc_profile.get("sub") or ""):
+		st.error("Calendar access was granted by a different Google account. Please use the account selected at sign-in.")
+		st.stop()
 
-	allowed = is_user_allowed(profile, config)
-	persist_authenticated_user(profile, token_payload, config, allowed)
+	allowed = is_user_allowed(oidc_profile, config)
+	persist_authenticated_user(oidc_profile, token_payload, config, allowed)
 	if not allowed:
 		st.error("This Google account is not allowed to access the scheduler.")
 		st.stop()
 
-	st.session_state[AUTH_SESSION_KEY] = _build_auth_session(profile, token_payload)
-	_create_remembered_session(str(profile["sub"]), config)
+	st.session_state[AUTH_SESSION_KEY] = _build_auth_session(oidc_profile, token_payload)
 	st.rerun()
 
 
@@ -310,7 +385,24 @@ def is_user_allowed(profile: dict[str, Any], config: GoogleOAuthConfig | None = 
 		return False
 	if email == ADMIN_EMAIL:
 		return True
-	return email in _resident_access_emails()
+	snapshot = get_cached_resident_access_snapshot()
+	fingerprint = str(snapshot.get("fingerprint") or "")
+	try:
+		cached = st.session_state.get(AUTHORIZATION_CACHE_KEY)
+	except Exception:
+		cached = None
+	if isinstance(cached, dict) and cached.get("email") == email and cached.get("fingerprint") == fingerprint:
+		return bool(cached.get("allowed"))
+	allowed = email in set(snapshot.get("emails") or ())
+	try:
+		st.session_state[AUTHORIZATION_CACHE_KEY] = {
+			"email": email,
+			"fingerprint": fingerprint,
+			"allowed": allowed,
+		}
+	except Exception:
+		pass
+	return allowed
 
 
 def _session_user_is_allowed(session: dict[str, Any]) -> bool:
@@ -318,42 +410,19 @@ def _session_user_is_allowed(session: dict[str, Any]) -> bool:
 	return is_user_allowed({"email": email})
 
 
-def _resident_access_emails() -> set[str]:
-	try:
-		init_db()
-		with get_connection() as conn:
-			rows = conn.execute(
-				"""
-				SELECT email
-				FROM residents
-				WHERE email IS NOT NULL
-				  AND TRIM(email) <> ''
-				"""
-			).fetchall()
-	except Exception:
-		return set()
-	return {_normalise_email(row["email"]) for row in rows if _normalise_email(row["email"])}
-
-
 def _normalise_email(value: Any) -> str:
 	return str(value or "").strip().casefold()
 
 
-def _render_access_denied(email: str, config: GoogleOAuthConfig | None = None) -> None:
-	if config is not None:
-		_delete_remembered_session(config)
-	_clear_remember_cookie()
+def _render_access_denied(email: str) -> None:
 	st.session_state.pop(AUTH_SESSION_KEY, None)
-	_hide_unauthenticated_navigation()
-	with st.sidebar:
-		render_sidebar_logo(st)
-	st.title("Residency Scheduler")
+	_render_auth_shell()
 	st.error(
 		f"{email or 'This Google account'} is not authorized to access the scheduler. "
 		"Ask an administrator to add that email to the Residents page."
 	)
 	if st.button("Try another Google account"):
-		st.rerun()
+		sign_out()
 	st.stop()
 
 
@@ -391,7 +460,6 @@ def persist_authenticated_user(
 	config: GoogleOAuthConfig,
 	allowed: bool,
 ) -> None:
-	init_db()
 	google_sub = str(profile["sub"])
 	with get_connection() as conn:
 		conn.execute(
@@ -449,16 +517,20 @@ def _handle_oauth_callback(code: str, state: str | None, config: GoogleOAuthConf
 		st.stop()
 
 	profile = id_token.verify_oauth2_token(credentials.id_token, Request(), config.client_id)
-	allowed = is_user_allowed(profile, config)
+	oidc_profile = _current_identity_profile()
+	if oidc_profile is None or str(profile.get("sub") or "") != str(oidc_profile.get("sub") or ""):
+		_clear_auth_query_params()
+		st.error("Calendar access was granted by a different Google account. Please use the account selected at sign-in.")
+		st.stop()
+	allowed = is_user_allowed(oidc_profile, config)
 	token_payload = _credentials_to_token_payload(credentials)
-	persist_authenticated_user(profile, token_payload, config, allowed)
+	persist_authenticated_user(oidc_profile, token_payload, config, allowed)
 	if not allowed:
 		_clear_auth_query_params()
 		st.error("This Google account is not allowed to access the scheduler.")
 		st.stop()
 
-	st.session_state[AUTH_SESSION_KEY] = _build_auth_session(profile, token_payload)
-	_create_remembered_session(str(profile["sub"]), config)
+	st.session_state[AUTH_SESSION_KEY] = _build_auth_session(oidc_profile, token_payload)
 	st.session_state.pop(OAUTH_STATE_KEY, None)
 	_clear_auth_query_params()
 	st.rerun()
@@ -570,7 +642,6 @@ def _refresh_session_if_possible(session: dict[str, Any]) -> bool:
 	config = load_google_oauth_config()
 	token_payload = dict(session.get("token") or {})
 	if config is None or not token_payload.get("refresh_token"):
-		sign_out()
 		return False
 
 	credentials = Credentials.from_authorized_user_info(
@@ -579,8 +650,7 @@ def _refresh_session_if_possible(session: dict[str, Any]) -> bool:
 	)
 	try:
 		credentials.refresh(Request())
-	except Exception:
-		sign_out()
+	except RefreshError:
 		return False
 
 	refreshed_payload = _credentials_to_token_payload(credentials)
@@ -588,169 +658,44 @@ def _refresh_session_if_possible(session: dict[str, Any]) -> bool:
 	allowed = is_user_allowed(profile, config)
 	persist_authenticated_user(profile, refreshed_payload, config, allowed)
 	if not allowed:
-		sign_out()
 		return False
 	st.session_state[AUTH_SESSION_KEY] = _build_auth_session(profile, refreshed_payload)
 	return True
 
 
-def _restore_session_from_cookie(config: GoogleOAuthConfig) -> dict[str, Any] | None:
-	cookie_value = _remember_cookie_value()
-	if not cookie_value:
+def _restore_session_for_profile(profile: dict[str, Any], config: GoogleOAuthConfig) -> dict[str, Any] | None:
+	google_sub = str(profile.get("sub") or "")
+	if not google_sub:
 		return None
-	session_hash = _remember_session_hash(cookie_value, config)
 	try:
-		init_db()
 		with get_connection() as conn:
 			row = conn.execute(
 				"""
-				SELECT s.google_sub, s.expires_at, u.email, u.name, u.picture_url, u.allowed, t.encrypted_token_json
-				FROM google_auth_sessions s
-				JOIN app_users u ON u.google_sub = s.google_sub
-				JOIN google_oauth_tokens t ON t.google_sub = s.google_sub
-				WHERE s.session_hash = ?
+				SELECT encrypted_token_json
+				FROM google_oauth_tokens
+				WHERE google_sub = ?
 				""",
-				(session_hash,),
+				(google_sub,),
 			).fetchone()
 	except Exception:
 		return None
 	if row is None:
 		return None
-	expires_at = _parse_timestamp(row["expires_at"])
-	if expires_at is None or expires_at <= datetime.now(timezone.utc):
-		_delete_remembered_session(config)
-		return None
 	try:
 		token_payload = decrypt_token_payload(str(row["encrypted_token_json"]), _token_encryption_secret(config))
 	except ValueError:
-		_delete_remembered_session(config)
 		return None
 	if not set(GOOGLE_CALENDAR_SCOPES).issubset(_normalise_scopes(token_payload.get("scopes"))):
 		return None
-
-	profile = {
-		"sub": str(row["google_sub"]),
-		"email": str(row["email"] or ""),
-		"name": str(row["name"] or ""),
-		"picture": str(row["picture_url"] or ""),
-	}
-	if not is_user_allowed(profile, config):
-		_delete_remembered_session(config)
-		return None
 	session = _build_auth_session(profile, token_payload)
 	if _session_auth_is_valid(session):
-		_mark_remembered_session_used(session_hash)
 		return session
 
 	session["token"] = token_payload
 	session["profile"] = profile
 	if _refresh_session_if_possible(session):
-		_mark_remembered_session_used(session_hash)
 		return st.session_state.get(AUTH_SESSION_KEY)
-
-	_delete_remembered_session(config)
 	return None
-
-
-def _create_remembered_session(google_sub: str, config: GoogleOAuthConfig) -> None:
-	cookie_value = secrets.token_urlsafe(32)
-	session_hash = _remember_session_hash(cookie_value, config)
-	expires_at = datetime.now(timezone.utc) + REMEMBER_SESSION_TTL
-	init_db()
-	with get_connection() as conn:
-		conn.execute(
-			"""
-			INSERT INTO google_auth_sessions (session_hash, google_sub, expires_at, created_at, updated_at, last_used_at)
-			VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-			ON CONFLICT(session_hash) DO UPDATE SET
-				google_sub = excluded.google_sub,
-				expires_at = excluded.expires_at,
-				updated_at = CURRENT_TIMESTAMP,
-				last_used_at = CURRENT_TIMESTAMP
-			""",
-			(session_hash, google_sub, expires_at.isoformat()),
-		)
-	st.session_state[PENDING_REMEMBER_COOKIE_KEY] = {
-		"value": cookie_value,
-		"expires_at": expires_at.isoformat(),
-	}
-
-
-def _delete_remembered_session(config: GoogleOAuthConfig) -> None:
-	cookie_value = _remember_cookie_value()
-	if not cookie_value:
-		return
-	session_hash = _remember_session_hash(cookie_value, config)
-	try:
-		with get_connection() as conn:
-			conn.execute("DELETE FROM google_auth_sessions WHERE session_hash = ?", (session_hash,))
-	except Exception:
-		return
-
-
-def _mark_remembered_session_used(session_hash: str) -> None:
-	try:
-		with get_connection() as conn:
-			conn.execute(
-				"""
-				UPDATE google_auth_sessions
-				SET last_used_at = CURRENT_TIMESTAMP
-				WHERE session_hash = ?
-				""",
-				(session_hash,),
-			)
-	except Exception:
-		return
-
-
-def _remember_session_hash(cookie_value: str, config: GoogleOAuthConfig) -> str:
-	secret = config.token_encryption_key or config.client_secret
-	return hmac.new(secret.encode("utf-8"), cookie_value.encode("utf-8"), hashlib.sha256).hexdigest()
-
-
-def _remember_cookie_value() -> str | None:
-	try:
-		value = st.context.cookies.get(AUTH_COOKIE_NAME)
-	except Exception:
-		return None
-	if not value:
-		return None
-	return str(value)
-
-
-def _set_remember_cookie(cookie_value: str, expires_at: datetime) -> None:
-	max_age = max(0, int((expires_at - datetime.now(timezone.utc)).total_seconds()))
-	components.html(
-		f"""
-		<script>
-		document.cookie = "{AUTH_COOKIE_NAME}={html.escape(cookie_value, quote=True)}; Max-Age={max_age}; Path=/; SameSite=Lax";
-		</script>
-		""",
-		height=0,
-		width=0,
-	)
-
-
-def _emit_pending_remember_cookie() -> None:
-	pending = st.session_state.pop(PENDING_REMEMBER_COOKIE_KEY, None)
-	if not pending:
-		return
-	expires_at = _parse_timestamp(pending.get("expires_at"))
-	if expires_at is None:
-		return
-	_set_remember_cookie(str(pending.get("value") or ""), expires_at)
-
-
-def _clear_remember_cookie() -> None:
-	components.html(
-		f"""
-		<script>
-		document.cookie = "{AUTH_COOKIE_NAME}=; Max-Age=0; Path=/; SameSite=Lax";
-		</script>
-		""",
-		height=0,
-		width=0,
-	)
 
 
 def _session_auth_is_valid(session: Any, now: datetime | None = None) -> bool:
@@ -807,7 +752,6 @@ def _parse_timestamp(value: Any) -> datetime | None:
 
 
 def _render_signed_in_sidebar(session: dict[str, Any]) -> None:
-	_emit_pending_remember_cookie()
 	with st.sidebar:
 		render_sidebar_logo(st)
 		st.caption(f"Signed in as {session.get('email', '')}")

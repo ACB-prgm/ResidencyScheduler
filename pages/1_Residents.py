@@ -4,9 +4,8 @@ import pandas as pd
 import streamlit as st
 from urllib.parse import quote
 
-from residency_scheduler.auth import require_google_auth
 from residency_scheduler.colors import RESIDENT_COLOR_PALETTE
-from residency_scheduler.cache import clear_all_data_caches, ensure_database_initialized, get_cached_residents, preload_reference_data
+from residency_scheduler.cache import clear_all_data_caches, get_cached_residents
 from residency_scheduler.repository import save_residents
 from residency_scheduler.ui import flash_error, flash_success, render_page_header, render_user_guide
 
@@ -43,10 +42,6 @@ def _restore_hidden_ids(edited: pd.DataFrame, original: pd.DataFrame) -> pd.Data
 		ids.append(resident_id)
 	restored["id"] = ids
 	return restored
-
-require_google_auth()
-ensure_database_initialized()
-preload_reference_data()
 
 render_page_header("Residents", "Maintain the active resident roster used by the scheduler.")
 render_user_guide(

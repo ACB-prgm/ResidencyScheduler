@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import pickle
 import sqlite3
 from collections.abc import Callable
@@ -66,6 +67,26 @@ def _get_cached_resident_options(database_url: str, active_only: bool = True) ->
 		f"reference:resident_options:active={active_only}",
 		lambda: repository.get_resident_options(active_only=active_only),
 	)
+
+
+def get_cached_resident_access_snapshot() -> dict[str, object]:
+	return _get_cached_resident_access_snapshot(get_database_url())
+
+
+@st.cache_data(show_spinner=False)
+def _get_cached_resident_access_snapshot(database_url: str) -> dict[str, object]:
+	residents = _get_cached_residents(database_url, active_only=False)
+	emails = tuple(
+		sorted(
+			{
+				str(value).strip().casefold()
+				for value in residents.get("email", pd.Series(dtype="object")).tolist()
+				if str(value or "").strip()
+			}
+		)
+	)
+	fingerprint = hashlib.sha256("\n".join(emails).encode("utf-8")).hexdigest()
+	return {"emails": emails, "fingerprint": fingerprint}
 
 
 def get_cached_period(period_id: int) -> dict:
@@ -189,7 +210,15 @@ def clear_reference_data_cache() -> None:
 	_get_cached_calendar_months.clear()
 	_get_cached_residents.clear()
 	_get_cached_resident_options.clear()
+	_get_cached_resident_access_snapshot.clear()
 	_clear_local_cache_prefix("reference:")
+
+
+def clear_schedule_request_cache() -> None:
+	"""Clear request-derived views without evicting unrelated month data."""
+	_get_cached_schedule_requests_for_editor.clear()
+	_get_cached_month_context.clear()
+	_clear_local_cache_patterns(["%:requests_editor", "%:context"])
 
 
 def clear_month_data_cache() -> None:
@@ -262,6 +291,15 @@ def _clear_local_cache_prefix(prefix: str) -> None:
 			""",
 			(f"{prefix}%", f"%:{prefix}%"),
 		)
+
+
+def _clear_local_cache_patterns(patterns: list[str]) -> None:
+	if not primary_database_is_remote() or not patterns:
+		return
+	with _local_cache_connection() as conn:
+		_ensure_local_cache_schema(conn)
+		where = " OR ".join("cache_key LIKE ?" for _ in patterns)
+		conn.execute(f"DELETE FROM local_cache WHERE {where}", tuple(patterns))
 
 
 def _local_cache_connection() -> sqlite3.Connection:

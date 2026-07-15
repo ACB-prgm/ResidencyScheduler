@@ -2,13 +2,10 @@ from __future__ import annotations
 
 import streamlit as st
 
-from residency_scheduler.auth import require_google_auth
 from residency_scheduler.cache import (
 	clear_month_data_cache,
-	ensure_database_initialized,
 	get_cached_resident_options,
 	get_cached_residents,
-	preload_reference_data,
 )
 from residency_scheduler.repository import (
 	WEEKDAYS,
@@ -42,10 +39,6 @@ def _rule_summary(row) -> str:
 		return f"{resident_name}: away rotation"
 	return f"{resident_name}: {rule_type}"
 
-
-require_google_auth()
-ensure_database_initialized()
-preload_reference_data()
 
 period_id = render_page_header(
 	"Scheduling Rules",

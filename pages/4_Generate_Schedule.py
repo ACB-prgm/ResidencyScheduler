@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import streamlit as st
 from streamlit_calendar import calendar
 
-from residency_scheduler.auth import require_google_auth
+from residency_scheduler.auth import get_current_auth_session
 from residency_scheduler.calendar.google import (
 	find_existing_period_events,
 	has_calendar_scopes,
@@ -16,12 +16,10 @@ from residency_scheduler.calendar.google import (
 from residency_scheduler.calendar.ical import build_fullcalendar_events, build_ical_calendar
 from residency_scheduler.cache import (
 	clear_month_data_cache,
-	ensure_database_initialized,
 	get_cached_month_context,
 	get_cached_resident_options,
 	get_cached_residents,
 	get_cached_workload_summary_for_scope,
-	preload_reference_data,
 )
 from residency_scheduler.repository import (
 	get_user_default_google_calendar_id,
@@ -112,9 +110,7 @@ def _clear_google_calendar_caches() -> None:
 	_clear_google_event_cache()
 
 
-auth_session = require_google_auth()
-ensure_database_initialized()
-preload_reference_data()
+auth_session = get_current_auth_session()
 
 period_id = render_page_header(
 	"Generate Schedule",

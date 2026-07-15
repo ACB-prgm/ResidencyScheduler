@@ -88,22 +88,11 @@ def test_unauthenticated_home_shows_sign_in_gate(isolated_db):
 	assert not app.error
 	assert len(app.selectbox) == 0
 	assert "User Guide: Google Sign-In" in [item.label for item in app.expander]
-	assert any("Go to huntingtonhealthresidencyscheduler.streamlit.app (unsafe)" in item.value for item in app.markdown)
-
-
-def test_unauthenticated_direct_page_shows_sign_in_gate(isolated_db):
-	app = AppTest.from_file(str(ROOT / "pages/4_Generate_Schedule.py"))
-	app.run(timeout=5)
-
-	assert not app.exception
-	assert len(app.sidebar.children) >= 1
-	assert not app.error
-	assert len(app.slider) == 0
-	assert "User Guide: Google Sign-In" in [item.label for item in app.expander]
+	assert any("Only the administrator" in item.value for item in app.markdown)
 
 
 def test_authenticated_non_resident_email_is_blocked(isolated_db):
-	app = AppTest.from_file(str(ROOT / "pages/1_Residents.py"))
+	app = AppTest.from_file(str(ROOT / "app.py"))
 	app.session_state[AUTH_SESSION_KEY] = unauthorized_session()
 	app.run(timeout=5)
 
@@ -114,7 +103,7 @@ def test_authenticated_non_resident_email_is_blocked(isolated_db):
 
 
 def test_authenticated_sidebar_shows_logo_and_sign_out(isolated_db):
-	app = AppTest.from_file(str(ROOT / "pages/1_Residents.py"))
+	app = AppTest.from_file(str(ROOT / "app.py"))
 	app.session_state[AUTH_SESSION_KEY] = authenticated_session()
 	app.run(timeout=5)
 

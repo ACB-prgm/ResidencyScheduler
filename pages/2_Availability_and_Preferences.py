@@ -4,15 +4,13 @@ from datetime import date
 
 import streamlit as st
 
-from residency_scheduler.auth import require_google_auth
+from residency_scheduler.auth import current_user_is_allowed
 from residency_scheduler.cache import (
-	clear_month_data_cache,
-	ensure_database_initialized,
+	clear_schedule_request_cache,
 	get_cached_period,
 	get_cached_resident_options,
 	get_cached_residents,
 	get_cached_schedule_requests_for_editor,
-	preload_reference_data,
 )
 from residency_scheduler.repository import (
 	create_schedule_request,
@@ -21,10 +19,6 @@ from residency_scheduler.repository import (
 	update_schedule_request,
 )
 from residency_scheduler.ui import flash_success, render_page_header, render_user_guide
-
-require_google_auth()
-ensure_database_initialized()
-preload_reference_data()
 
 period_id = render_page_header(
 	"Availability and Preferences",
@@ -102,7 +96,7 @@ def _resident_label_for_id(resident_id: int) -> str:
 
 existing = get_cached_schedule_requests_for_editor(period_id)
 if "id" not in existing.columns or "resident_id" not in existing.columns:
-	clear_month_data_cache()
+	clear_schedule_request_cache()
 	st.rerun()
 metric_cols = st.columns(3)
 metric_cols[0].metric("Active residents", len(residents))
@@ -121,6 +115,11 @@ if is_editing and int(edit_request_id) not in set(existing["id"].astype(int)):
 def _sync_default_priority() -> None:
 	if st.session_state.get(edit_request_key) is None:
 		st.session_state[priority_key] = default_priority_for_request_type(st.session_state[request_type_key])
+
+
+def _sync_end_date() -> None:
+	if st.session_state[end_date_key] < st.session_state[start_date_key]:
+		st.session_state[end_date_key] = st.session_state[start_date_key]
 
 
 def _queue_request_form_reset() -> None:
@@ -146,7 +145,10 @@ def _load_request_for_edit(row) -> None:
 		"reason": str(row["reason"] or ""),
 	}
 
-with form_col:
+@st.fragment
+def _render_availability_form() -> None:
+	if not current_user_is_allowed():
+		st.rerun(scope="app")
 	st.subheader("Edit Availability" if is_editing else "+ Add Availability")
 	selected_request_type = st.selectbox(
 		"Availability type",
@@ -155,16 +157,9 @@ with form_col:
 		on_change=_sync_default_priority,
 	)
 	selected_resident = st.selectbox("Resident", list(resident_options.keys()), key=resident_key)
-	start_date = st.date_input("Start date", key=start_date_key)
-	if st.session_state[end_date_key] < start_date:
-		st.session_state[end_date_key] = start_date
-		st.rerun()
+	start_date = st.date_input("Start date", key=start_date_key, on_change=_sync_end_date)
 	end_date = st.date_input("End date", min_value=start_date, key=end_date_key)
-	priority = st.selectbox(
-		"Priority",
-		["hard", "soft"],
-		key=priority_key,
-	)
+	priority = st.selectbox("Priority", ["hard", "soft"], key=priority_key)
 	reason = st.text_input("Reason", key=reason_key)
 
 	button_cols = st.columns([1, 1]) if is_editing else [st.container()]
@@ -172,7 +167,7 @@ with form_col:
 	cancel_clicked = is_editing and button_cols[1].button("Cancel")
 	if cancel_clicked:
 		_queue_request_form_reset()
-		st.rerun()
+		st.rerun(scope="app")
 
 	if save_clicked:
 		try:
@@ -199,9 +194,13 @@ with form_col:
 			st.error(str(exc))
 		else:
 			_queue_request_form_reset()
-			clear_month_data_cache()
+			clear_schedule_request_cache()
 			flash_success("Availability and preferences saved.")
-			st.rerun()
+			st.rerun(scope="app")
+
+
+with form_col:
+	_render_availability_form()
 
 with availability_col:
 	st.subheader("Current Availability")
@@ -225,6 +224,6 @@ with availability_col:
 						delete_schedule_request(int(row["id"]))
 						if st.session_state.get(edit_request_key) == int(row["id"]):
 							_queue_request_form_reset()
-						clear_month_data_cache()
+						clear_schedule_request_cache()
 						flash_success("Availability and preferences saved.")
 						st.rerun()

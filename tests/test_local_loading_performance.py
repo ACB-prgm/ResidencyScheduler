@@ -130,3 +130,77 @@ def test_month_cache_clear_removes_versioned_remote_cache_entries(tmp_path, monk
 	assert calls["count"] == 2
 	assert int(first.iloc[0]["value"]) == 1
 	assert int(second.iloc[0]["value"]) == 2
+
+
+def test_resident_access_snapshot_reuses_cached_roster(tmp_path, monkeypatch):
+	monkeypatch.setenv("RESIDENCY_SCHEDULER_DB", str(tmp_path / "access-cache.sqlite"))
+	monkeypatch.setattr(cache, "primary_database_is_remote", lambda: False)
+	calls = {"count": 0}
+
+	def load_residents(active_only=False):
+		assert active_only is False
+		calls["count"] += 1
+		return pd.DataFrame(
+			[
+				{"email": " Ada@Example.com "},
+				{"email": "ada@example.com"},
+				{"email": ""},
+			]
+		)
+
+	monkeypatch.setattr(cache.repository, "get_residents", load_residents)
+	cache.clear_all_data_caches()
+
+	first = cache.get_cached_resident_access_snapshot()
+	second = cache.get_cached_resident_access_snapshot()
+
+	assert calls["count"] == 1
+	assert first == second
+	assert first["emails"] == ("ada@example.com",)
+	assert first["fingerprint"]
+
+
+def test_reference_cache_clear_refreshes_resident_access_snapshot(tmp_path, monkeypatch):
+	monkeypatch.setenv("RESIDENCY_SCHEDULER_DB", str(tmp_path / "access-refresh.sqlite"))
+	monkeypatch.setattr(cache, "primary_database_is_remote", lambda: False)
+	emails = ["first@example.com"]
+
+	monkeypatch.setattr(
+		cache.repository,
+		"get_residents",
+		lambda active_only=False: pd.DataFrame([{"email": value} for value in emails]),
+	)
+	cache.clear_all_data_caches()
+
+	first = cache.get_cached_resident_access_snapshot()
+	emails[:] = ["second@example.com"]
+	still_cached = cache.get_cached_resident_access_snapshot()
+	cache.clear_reference_data_cache()
+	refreshed = cache.get_cached_resident_access_snapshot()
+
+	assert still_cached == first
+	assert refreshed["emails"] == ("second@example.com",)
+	assert refreshed["fingerprint"] != first["fingerprint"]
+
+
+def test_request_cache_clear_keeps_unrelated_month_cache_entries(tmp_path, monkeypatch):
+	cache_path = tmp_path / "request-cache.sqlite"
+	monkeypatch.setattr(cache, "primary_database_is_remote", lambda: True)
+	monkeypatch.setattr(cache, "get_cache_db_path", lambda: cache_path)
+	calls = {"requests": 0, "context": 0, "assignments": 0}
+
+	def load(name):
+		calls[name] += 1
+		return pd.DataFrame([{"value": calls[name]}])
+
+	cache._read_through_local_cache("month:1:requests_editor", lambda: load("requests"))
+	cache._read_through_local_cache("month:1:context", lambda: load("context"))
+	cache._read_through_local_cache("month:1:assignments", lambda: load("assignments"))
+
+	cache.clear_schedule_request_cache()
+
+	cache._read_through_local_cache("month:1:requests_editor", lambda: load("requests"))
+	cache._read_through_local_cache("month:1:context", lambda: load("context"))
+	cache._read_through_local_cache("month:1:assignments", lambda: load("assignments"))
+
+	assert calls == {"requests": 2, "context": 2, "assignments": 1}

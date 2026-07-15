@@ -135,6 +135,44 @@ def test_access_control_rejects_blank_email(isolated_auth_db):
 	assert not auth.is_user_allowed({}, config)
 
 
+def test_access_control_reuses_boolean_until_roster_fingerprint_changes(monkeypatch):
+	stub = AuthStreamlitStub()
+	monkeypatch.setattr(auth, "st", stub)
+	snapshots = [
+		{"emails": ("resident@example.com",), "fingerprint": "version-1"},
+		{"emails": ("resident@example.com",), "fingerprint": "version-1"},
+		{"emails": (), "fingerprint": "version-2"},
+	]
+	monkeypatch.setattr(auth, "get_cached_resident_access_snapshot", lambda: snapshots.pop(0))
+
+	assert auth.is_user_allowed({"email": "resident@example.com"})
+	assert auth.is_user_allowed({"email": "resident@example.com"})
+	assert not auth.is_user_allowed({"email": "resident@example.com"})
+
+
+def test_current_identity_profile_reads_streamlit_oidc_user(monkeypatch):
+	class OidcUser(dict):
+		is_logged_in = True
+
+	stub = AuthStreamlitStub()
+	stub.user = OidcUser(
+		{
+			"sub": "google-sub-1",
+			"email": "resident@example.com",
+			"name": "Resident User",
+			"picture": "https://example.com/picture.png",
+		}
+	)
+	monkeypatch.setattr(auth, "st", stub)
+
+	assert auth._current_identity_profile() == {
+		"sub": "google-sub-1",
+		"email": "resident@example.com",
+		"name": "Resident User",
+		"picture": "https://example.com/picture.png",
+	}
+
+
 def test_signed_oauth_state_validates_without_session_state():
 	config = auth.GoogleOAuthConfig(
 		client_id="client",
@@ -261,7 +299,7 @@ def test_streamlit_oauth_redirect_uri_uses_component_callback():
 	)
 
 
-def test_streamlit_oauth_button_uses_google_component_flow(monkeypatch):
+def test_calendar_authorization_button_uses_google_component_flow(monkeypatch):
 	stub = AuthStreamlitStub()
 	monkeypatch.setattr(auth, "st", stub)
 	component = OAuth2ComponentStub(result=None)
@@ -272,17 +310,18 @@ def test_streamlit_oauth_button_uses_google_component_flow(monkeypatch):
 		redirect_uri="http://localhost:8501",
 	)
 
-	auth._render_streamlit_oauth_button(config)
+	auth._render_calendar_authorization_button(config, {"sub": "google-sub-1", "email": "user@example.org"})
 
 	assert component.init_kwargs["authorize_endpoint"] == auth.GOOGLE_AUTHORIZE_ENDPOINT
 	assert component.init_kwargs["token_endpoint"] == auth.GOOGLE_TOKEN_ENDPOINT
 	assert component.init_kwargs["token_endpoint_auth_method"] == "client_secret_post"
 	assert component.authorize_kwargs["redirect_uri"] == "http://localhost:8501/component/streamlit_oauth.authorize_button"
+	assert component.authorize_kwargs["name"] == "Authorize Google Calendar"
 	assert component.authorize_kwargs["scope"] == " ".join(auth.GOOGLE_REQUIRED_SCOPES)
 	assert component.authorize_kwargs["extras_params"] == {
 		"access_type": "offline",
 		"include_granted_scopes": "true",
-		"prompt": "consent select_account",
+		"prompt": "consent",
 	}
 
 
@@ -388,7 +427,7 @@ def test_persist_authenticated_user_uses_client_secret_when_no_token_key(isolate
 	assert auth.decrypt_token_payload(token["encrypted_token_json"], "plain-client-secret") == token_payload
 
 
-def test_create_remembered_session_stores_hashed_cookie_only(isolated_auth_db, monkeypatch):
+def test_restore_session_for_oidc_profile_uses_encrypted_stored_token(isolated_auth_db):
 	key = Fernet.generate_key().decode("utf-8")
 	config = auth.GoogleOAuthConfig(
 		client_id="client",
@@ -396,9 +435,6 @@ def test_create_remembered_session_stores_hashed_cookie_only(isolated_auth_db, m
 		redirect_uri="http://localhost:8501",
 		token_encryption_key=key,
 	)
-	stub = AuthStreamlitStub()
-	monkeypatch.setattr(auth, "st", stub)
-	monkeypatch.setattr(auth.secrets, "token_urlsafe", lambda _size: "remember-cookie-value")
 	profile = {"sub": "google-sub-1", "email": "user@example.org", "name": "Test User", "picture": ""}
 	token_payload = {
 		"token": "access-token",
@@ -408,68 +444,7 @@ def test_create_remembered_session_stores_hashed_cookie_only(isolated_auth_db, m
 	}
 	auth.persist_authenticated_user(profile, token_payload, config, allowed=True)
 
-	auth._create_remembered_session("google-sub-1", config)
-
-	with get_connection() as conn:
-		row = conn.execute("SELECT * FROM google_auth_sessions").fetchone()
-
-	assert row is not None
-	assert row["session_hash"] != "remember-cookie-value"
-	assert row["google_sub"] == "google-sub-1"
-	assert stub.session_state[auth.PENDING_REMEMBER_COOKIE_KEY]["value"] == "remember-cookie-value"
-
-
-def test_create_remembered_session_works_without_explicit_token_key(isolated_auth_db, monkeypatch):
-	config = auth.GoogleOAuthConfig(
-		client_id="client",
-		client_secret="plain-client-secret",
-		redirect_uri="http://localhost:8501",
-	)
-	stub = AuthStreamlitStub()
-	monkeypatch.setattr(auth, "st", stub)
-	monkeypatch.setattr(auth.secrets, "token_urlsafe", lambda _size: "remember-cookie-value")
-	profile = {"sub": "google-sub-1", "email": "user@example.org", "name": "Test User", "picture": ""}
-	token_payload = {
-		"token": "access-token",
-		"refresh_token": "refresh-token",
-		"expiry": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
-		"scopes": ["openid", "email", "profile", *auth.GOOGLE_CALENDAR_SCOPES],
-	}
-	auth.persist_authenticated_user(profile, token_payload, config, allowed=True)
-
-	auth._create_remembered_session("google-sub-1", config)
-
-	with get_connection() as conn:
-		row = conn.execute("SELECT * FROM google_auth_sessions").fetchone()
-
-	assert row is not None
-	assert stub.session_state[auth.PENDING_REMEMBER_COOKIE_KEY]["value"] == "remember-cookie-value"
-
-
-def test_restore_session_from_cookie_uses_encrypted_stored_token(isolated_auth_db, monkeypatch):
-	_insert_resident_email("user@example.org")
-	key = Fernet.generate_key().decode("utf-8")
-	config = auth.GoogleOAuthConfig(
-		client_id="client",
-		client_secret="secret",
-		redirect_uri="http://localhost:8501",
-		token_encryption_key=key,
-	)
-	stub = AuthStreamlitStub()
-	monkeypatch.setattr(auth, "st", stub)
-	monkeypatch.setattr(auth.secrets, "token_urlsafe", lambda _size: "remember-cookie-value")
-	profile = {"sub": "google-sub-1", "email": "user@example.org", "name": "Test User", "picture": ""}
-	token_payload = {
-		"token": "access-token",
-		"refresh_token": "refresh-token",
-		"expiry": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
-		"scopes": ["openid", "email", "profile", *auth.GOOGLE_CALENDAR_SCOPES],
-	}
-	auth.persist_authenticated_user(profile, token_payload, config, allowed=True)
-	auth._create_remembered_session("google-sub-1", config)
-	monkeypatch.setattr(auth, "_remember_cookie_value", lambda: "remember-cookie-value")
-
-	restored = auth._restore_session_from_cookie(config)
+	restored = auth._restore_session_for_profile(profile, config)
 
 	assert restored is not None
 	assert restored["google_sub"] == "google-sub-1"
@@ -477,8 +452,7 @@ def test_restore_session_from_cookie_uses_encrypted_stored_token(isolated_auth_d
 	assert restored["token"]["token"] == "access-token"
 
 
-def test_restore_session_from_cookie_attempts_refresh_for_expired_token(isolated_auth_db, monkeypatch):
-	_insert_resident_email("user@example.org")
+def test_restore_session_for_oidc_profile_attempts_refresh_for_expired_token(isolated_auth_db, monkeypatch):
 	key = Fernet.generate_key().decode("utf-8")
 	config = auth.GoogleOAuthConfig(
 		client_id="client",
@@ -488,7 +462,6 @@ def test_restore_session_from_cookie_attempts_refresh_for_expired_token(isolated
 	)
 	stub = AuthStreamlitStub()
 	monkeypatch.setattr(auth, "st", stub)
-	monkeypatch.setattr(auth.secrets, "token_urlsafe", lambda _size: "remember-cookie-value")
 	monkeypatch.setattr(auth, "load_google_oauth_config", lambda: config)
 	profile = {"sub": "google-sub-1", "email": "user@example.org", "name": "Test User", "picture": ""}
 	token_payload = {
@@ -498,8 +471,6 @@ def test_restore_session_from_cookie_attempts_refresh_for_expired_token(isolated
 		"scopes": ["openid", "email", "profile", *auth.GOOGLE_CALENDAR_SCOPES],
 	}
 	auth.persist_authenticated_user(profile, token_payload, config, allowed=True)
-	auth._create_remembered_session("google-sub-1", config)
-	monkeypatch.setattr(auth, "_remember_cookie_value", lambda: "remember-cookie-value")
 
 	def fake_refresh(session):
 		stub.session_state[auth.AUTH_SESSION_KEY] = {
@@ -514,13 +485,13 @@ def test_restore_session_from_cookie_attempts_refresh_for_expired_token(isolated
 
 	monkeypatch.setattr(auth, "_refresh_session_if_possible", fake_refresh)
 
-	restored = auth._restore_session_from_cookie(config)
+	restored = auth._restore_session_for_profile(profile, config)
 
 	assert restored is not None
 	assert restored["token"]["token"] == "refreshed-access-token"
 
 
-def test_restore_session_from_cookie_rechecks_current_resident_access(isolated_auth_db, monkeypatch):
+def test_restore_session_for_oidc_profile_does_not_use_another_users_token(isolated_auth_db):
 	key = Fernet.generate_key().decode("utf-8")
 	config = auth.GoogleOAuthConfig(
 		client_id="client",
@@ -528,10 +499,7 @@ def test_restore_session_from_cookie_rechecks_current_resident_access(isolated_a
 		redirect_uri="http://localhost:8501",
 		token_encryption_key=key,
 	)
-	stub = AuthStreamlitStub()
-	monkeypatch.setattr(auth, "st", stub)
-	monkeypatch.setattr(auth.secrets, "token_urlsafe", lambda _size: "remember-cookie-value")
-	profile = {"sub": "google-sub-1", "email": "removed@example.org", "name": "Removed User", "picture": ""}
+	profile = {"sub": "google-sub-1", "email": "user@example.org", "name": "Test User", "picture": ""}
 	token_payload = {
 		"token": "access-token",
 		"refresh_token": "refresh-token",
@@ -539,14 +507,13 @@ def test_restore_session_from_cookie_rechecks_current_resident_access(isolated_a
 		"scopes": ["openid", "email", "profile", *auth.GOOGLE_CALENDAR_SCOPES],
 	}
 	auth.persist_authenticated_user(profile, token_payload, config, allowed=True)
-	auth._create_remembered_session("google-sub-1", config)
-	monkeypatch.setattr(auth, "_remember_cookie_value", lambda: "remember-cookie-value")
 
-	restored = auth._restore_session_from_cookie(config)
+	restored = auth._restore_session_for_profile(
+		{"sub": "different-google-sub", "email": "user@example.org", "name": "Other User", "picture": ""},
+		config,
+	)
 
 	assert restored is None
-	with get_connection() as conn:
-		assert conn.execute("SELECT COUNT(*) AS count FROM google_auth_sessions").fetchone()["count"] == 0
 
 
 def test_session_auth_valid_uses_local_session_payload_without_storage():
@@ -589,7 +556,8 @@ def test_unauthenticated_gate_stops_before_scheduler_content(monkeypatch):
 
 	assert stub.stopped
 	assert stub.images
-	assert "Google OAuth is not configured" in stub.errors[0]
+	assert not stub.errors
+	assert any("Only the administrator" in value for value in stub.markdowns)
 
 
 class StopException(Exception):
@@ -668,6 +636,9 @@ class AuthStreamlitStub:
 
 	def button(self, _label, **_kwargs):
 		return False
+
+	def expander(self, _label, **_kwargs):
+		return self
 
 	def stop(self):
 		self.stopped = True
