@@ -4,21 +4,14 @@ import calendar
 
 import streamlit as st
 
-from residency_scheduler.auth import require_google_auth
 from residency_scheduler.cache import (
 	clear_month_data_cache,
-	ensure_database_initialized,
 	get_cached_assignments,
 	get_cached_period,
 	get_cached_residents,
-	preload_reference_data,
 )
 from residency_scheduler.repository import update_schedule_period_settings
 from residency_scheduler.ui import flash_error, flash_success, render_page_header, render_user_guide
-
-require_google_auth()
-ensure_database_initialized()
-preload_reference_data()
 
 period_id = render_page_header(
 	"Residency Call Scheduler",
