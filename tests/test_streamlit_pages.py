@@ -13,6 +13,7 @@ from residency_scheduler.repository import (
 	create_schedule_rule,
 	create_schedule_request,
 	get_or_create_schedule_period,
+	get_recurring_preferences_for_editor,
 	get_schedule_requests_for_editor,
 	get_schedule_rules,
 	save_residents,
@@ -216,12 +217,12 @@ def test_availability_end_date_is_not_before_start_date(isolated_db):
 	app = AppTest.from_file(str(ROOT / "pages/2_Availability_and_Preferences.py"))
 	app.session_state[AUTH_SESSION_KEY] = authenticated_session()
 	period_id = get_or_create_schedule_period(date.today().year, date.today().month, required_count=1)
-	app.session_state[f"request_start_{period_id}"] = date(date.today().year, date.today().month, 10)
-	app.session_state[f"request_end_{period_id}"] = date(date.today().year, date.today().month, 5)
+	app.session_state[f"dated_start_{period_id}"] = date(date.today().year, date.today().month, 10)
+	app.session_state[f"dated_end_{period_id}"] = date(date.today().year, date.today().month, 5)
 	app.run(timeout=5)
 
 	assert not app.exception
-	assert app.session_state[f"request_end_{period_id}"] == app.session_state[f"request_start_{period_id}"]
+	assert app.session_state[f"dated_end_{period_id}"] == app.session_state[f"dated_start_{period_id}"]
 
 
 def test_availability_page_edits_existing_row(isolated_db):
@@ -241,7 +242,7 @@ def test_availability_page_edits_existing_row(isolated_db):
 	next(item for item in app.selectbox if item.label == "Resident").select("Ben")
 	next(item for item in app.selectbox if item.label == "Availability type").select("prefer_off")
 	next(item for item in app.selectbox if item.label == "Priority").select("soft")
-	next(item for item in app.text_input if item.label == "Reason").set_value("Updated reason")
+	next(item for item in app.text_input if item.label == "Description").set_value("Updated reason")
 	next(button for button in app.button if button.label == "Save changes").click()
 	app.run(timeout=5)
 
@@ -251,6 +252,41 @@ def test_availability_page_edits_existing_row(isolated_db):
 	assert requests.iloc[0]["request_type"] == "prefer_off"
 	assert requests.iloc[0]["priority"] == "soft"
 	assert requests.iloc[0]["reason"] == "Updated reason"
+
+
+def test_availability_page_renders_dated_and_recurring_workflows(isolated_db):
+	app = AppTest.from_file(str(ROOT / "pages/2_Availability_and_Preferences.py"))
+	app.session_state[AUTH_SESSION_KEY] = authenticated_session()
+	app.run(timeout=5)
+
+	assert not app.exception
+	assert [tab.label for tab in app.tabs] == ["Dated", "Recurring"]
+	assert app.session_state["availability_preference_tabs"] == "Dated"
+	assert "Add recurring preference" in [button.label for button in app.button]
+	assert "Description" in [item.label for item in app.text_input]
+	assert "Reason" not in [item.label for item in app.text_input]
+
+
+def test_availability_page_adds_recurring_preference(isolated_db):
+	app = AppTest.from_file(str(ROOT / "pages/2_Availability_and_Preferences.py"))
+	app.session_state[AUTH_SESSION_KEY] = authenticated_session()
+	app.run(timeout=5)
+
+	resident_inputs = [item for item in app.selectbox if item.label == "Resident"]
+	assert len(resident_inputs) == 2
+	resident_inputs[1].select("Ben")
+	next(item for item in app.selectbox if item.label == "Preference type").select("prefer_work")
+	next(item for item in app.selectbox if item.label == "Weekday").select("Wednesday")
+	next(button for button in app.button if button.label == "Add recurring preference").click()
+	app.run(timeout=5)
+
+	preferences = get_recurring_preferences_for_editor()
+	assert not app.exception
+	assert len(preferences) == 1
+	assert preferences.iloc[0]["resident"] == "Ben"
+	assert preferences.iloc[0]["request_type"] == "prefer_work"
+	assert int(preferences.iloc[0]["weekday"]) == 2
+	assert preferences.iloc[0]["priority"] == "soft"
 
 
 def test_availability_page_cancel_exits_edit_mode(isolated_db):

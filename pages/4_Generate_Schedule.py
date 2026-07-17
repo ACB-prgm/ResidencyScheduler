@@ -194,7 +194,8 @@ if not assignments.empty:
 	if violations.empty:
 		st.success("No prefer-off violations in the current schedule.")
 	else:
-		st.dataframe(violations, width="stretch", hide_index=True)
+		display_violations = violations.rename(columns={"reason": "Description"})
+		st.dataframe(display_violations, width="stretch", hide_index=True)
 
 	with st.expander("Edit Assignment"):
 		residents = get_cached_residents(active_only=True)
@@ -210,7 +211,7 @@ if not assignments.empty:
 			resident_options = get_cached_resident_options(active_only=True)
 			mode = st.radio("Edit mode", ["Reassign", "Swap"], horizontal=True)
 			make_locked = st.checkbox("Create hard assign request from this edit")
-			lock_reason = st.text_input("Reason", value="Manual review edit")
+			lock_reason = st.text_input("Description", value="Manual review edit")
 
 			if mode == "Reassign":
 				assignment_label = st.selectbox("Assignment", list(assignment_options.keys()), key="reassign_assignment")

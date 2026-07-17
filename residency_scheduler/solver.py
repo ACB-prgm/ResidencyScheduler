@@ -73,14 +73,14 @@ def solve_period(period_id: int, max_time_seconds: int = 30, random_seed: int | 
 
 	hard_unavailable = requests[
 		(requests["priority"].str.lower() == "hard")
-		& (requests["request_type"].str.lower().isin(HARD_UNAVAILABLE_TYPES))
+		& (requests["request_type"].str.lower().isin(HARD_UNAVAILABLE_TYPES | {"prefer_off"}))
 	]
 	for row in hard_unavailable.itertuples():
 		model.Add(works[(int(row.resident_id), str(row.work_date))] == 0)
 
 	hard_assignments = requests[
 		(requests["priority"].str.lower() == "hard")
-		& (requests["request_type"].str.lower() == "assign")
+		& (requests["request_type"].str.lower().isin({"assign", "prefer_work"}))
 	]
 	for row in hard_assignments.itertuples():
 		model.Add(works[(int(row.resident_id), str(row.work_date))] == 1)
@@ -457,29 +457,36 @@ def _validate_inputs(
 
 	hard_assignments = requests[
 		(requests["priority"].str.lower() == "hard")
-		& (requests["request_type"].str.lower() == "assign")
+		& (requests["request_type"].str.lower().isin({"assign", "prefer_work"}))
 	]
 	if not hard_assignments.empty:
 		for work_date, group in hard_assignments.groupby("work_date"):
-			if len(group) > required_count:
-				errors.append(f"{work_date} has {len(group)} hard assign request(s) but only requires {required_count} resident(s).")
+			hard_work_count = group["resident_id"].astype(int).nunique()
+			if hard_work_count > required_count:
+				errors.append(
+					f"{work_date} has {hard_work_count} hard assign request(s) or hard prefer-work request(s), "
+					f"but only requires {required_count} resident(s)."
+				)
 
 		for resident_id, group in hard_assignments.groupby("resident_id"):
 			matches = residents.loc[residents["id"].astype(int) == int(resident_id), "max_shifts"]
-			if not matches.empty and pd.notna(matches.iloc[0]) and len(group) > int(matches.iloc[0]):
+			hard_work_count = group["work_date"].astype(str).nunique()
+			if not matches.empty and pd.notna(matches.iloc[0]) and hard_work_count > int(matches.iloc[0]):
 				errors.append(
-					f"resident_id {resident_id} has {len(group)} hard assign request(s), exceeding max_shifts {int(matches.iloc[0])}."
+					f"resident_id {resident_id} has {hard_work_count} hard work request(s), "
+					f"exceeding max_shifts {int(matches.iloc[0])}."
 				)
 
 	hard_unavailable = requests[
 		(requests["priority"].str.lower() == "hard")
-		& (requests["request_type"].str.lower().isin(HARD_UNAVAILABLE_TYPES))
+		& (requests["request_type"].str.lower().isin(HARD_UNAVAILABLE_TYPES | {"prefer_off"}))
 	]
 	if not hard_assignments.empty and not hard_unavailable.empty:
 		conflicts = hard_assignments.merge(hard_unavailable, on=["resident_id", "work_date"], suffixes=("_assign", "_unavailable"))
 		for row in conflicts.itertuples():
 			errors.append(
-				f"Hard request conflict: resident_id {row.resident_id} is assigned on {row.work_date} but marked hard unavailable."
+				f"Hard request conflict: resident_id {row.resident_id} must work on {row.work_date} "
+				"but is marked hard unavailable/off."
 			)
 
 	hard_away_rules = rules[

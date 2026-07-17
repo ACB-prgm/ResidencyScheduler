@@ -69,14 +69,16 @@ def test_availability_cache_path_loads_only_request_dependencies(monkeypatch):
 	monkeypatch.setattr(cache.repository, "get_resident_options", lambda active_only=True: calls.append("options") or {})
 	monkeypatch.setattr(cache.repository, "get_period", lambda period_id: calls.append("period") or {"id": period_id})
 	monkeypatch.setattr(cache.repository, "get_schedule_requests_for_editor", lambda period_id: calls.append("requests") or pd.DataFrame())
+	monkeypatch.setattr(cache.repository, "get_recurring_preferences_for_editor", lambda: calls.append("recurring") or pd.DataFrame())
 	cache.clear_all_data_caches()
 
 	cache.get_cached_residents(active_only=True)
 	cache.get_cached_resident_options(active_only=True)
 	cache.get_cached_period(1)
 	cache.get_cached_schedule_requests_for_editor(1)
+	cache.get_cached_recurring_preferences_for_editor()
 
-	assert calls == ["residents:True", "options", "period", "requests"]
+	assert calls == ["residents:True", "options", "period", "requests", "recurring"]
 
 
 def test_generate_cache_path_loads_full_review_context(monkeypatch):
@@ -204,3 +206,22 @@ def test_request_cache_clear_keeps_unrelated_month_cache_entries(tmp_path, monke
 	cache._read_through_local_cache("month:1:assignments", lambda: load("assignments"))
 
 	assert calls == {"requests": 2, "context": 2, "assignments": 1}
+
+
+def test_request_cache_clear_refreshes_recurring_preferences(tmp_path, monkeypatch):
+	cache_path = tmp_path / "recurring-cache.sqlite"
+	monkeypatch.setattr(cache, "primary_database_is_remote", lambda: True)
+	monkeypatch.setattr(cache, "get_cache_db_path", lambda: cache_path)
+	calls = {"recurring": 0, "assignments": 0}
+
+	def load(name):
+		calls[name] += 1
+		return pd.DataFrame([{"value": calls[name]}])
+
+	cache._read_through_local_cache("reference:recurring_preferences_editor", lambda: load("recurring"))
+	cache._read_through_local_cache("month:1:assignments", lambda: load("assignments"))
+	cache.clear_schedule_request_cache()
+	cache._read_through_local_cache("reference:recurring_preferences_editor", lambda: load("recurring"))
+	cache._read_through_local_cache("month:1:assignments", lambda: load("assignments"))
+
+	assert calls == {"recurring": 2, "assignments": 1}

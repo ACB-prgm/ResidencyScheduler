@@ -15,7 +15,7 @@ from residency_scheduler.repository import (
 	get_schedule_rules,
 	update_schedule_rule,
 )
-from residency_scheduler.ui import flash_success, render_page_header, render_user_guide
+from residency_scheduler.ui import flash_success, render_card_action_styles, render_page_header, render_user_guide
 
 RULE_TYPE_LABELS = {
 	"weekday_count": "Weekday count",
@@ -58,6 +58,7 @@ render_user_guide(
 	Example: for an away rotation with required City of Hope weekend coverage, add an Away rotation rule plus a Weekday pair count rule for Friday and Saturday with target count 1. Keep rules hard unless the solver may miss the target when needed.
 	""",
 )
+render_card_action_styles()
 residents = get_cached_residents(active_only=True)
 
 if residents.empty:
@@ -169,7 +170,7 @@ with form_col:
 			target_count = int(st.number_input("Target count", min_value=0, step=1, key=rule_target_count_key))
 
 		priority = st.selectbox("Priority", ["hard", "soft"], key=rule_priority_key)
-		reason = st.text_input("Reason", key=rule_reason_key)
+		reason = st.text_input("Description", key=rule_reason_key)
 		button_cols = st.columns([1, 1]) if is_editing_rule else [st.container()]
 		submitted = button_cols[0].form_submit_button("Save changes" if is_editing_rule else "Add rule", type="primary")
 		cancelled = is_editing_rule and button_cols[1].form_submit_button("Cancel")
@@ -218,20 +219,18 @@ with rules_col:
 	else:
 		for row in rules.itertuples():
 			with st.container(border=True):
-				summary_col, action_col = st.columns([5, 1])
-				summary_col.markdown(f"**{_rule_summary(row)}**")
-				details = [f"Priority: {str(row.priority).title()}"]
+				st.markdown(f"**{_rule_summary(row)}**")
+				st.caption(f"Priority: {str(row.priority).title()}")
 				if row.reason:
-					details.append(f"Reason: {row.reason}")
-				summary_col.caption(" · ".join(details))
-				with action_col:
-					if st.button("Edit", key=f"edit_rule_{int(row.id)}"):
-						_load_rule_for_edit(row)
-						st.rerun()
-					if st.button("Delete", key=f"delete_rule_{int(row.id)}"):
-						delete_schedule_rule(int(row.id), period_id)
-						if st.session_state.get(edit_rule_key) == int(row.id):
-							_queue_rule_form_reset()
-						clear_month_data_cache()
-						flash_success("Scheduling rule deleted.")
-						st.rerun()
+					st.caption(f"Description: {row.reason}")
+				actions = st.columns([1, 1, 3])
+				if actions[0].button("Edit", key=f"edit_rule_{int(row.id)}", width="stretch"):
+					_load_rule_for_edit(row)
+					st.rerun()
+				if actions[1].button("Delete", key=f"delete_rule_{int(row.id)}", width="stretch"):
+					delete_schedule_rule(int(row.id), period_id)
+					if st.session_state.get(edit_rule_key) == int(row.id):
+						_queue_rule_form_reset()
+					clear_month_data_cache()
+					flash_success("Scheduling rule deleted.")
+					st.rerun()

@@ -16,6 +16,7 @@ HARD_UNAVAILABLE_TYPES = {"vacation", "unavailable", "approved_absence", "medica
 REQUEST_TYPES = HARD_UNAVAILABLE_TYPES | {"prefer_off", "prefer_work", "assign"}
 HARD_DEFAULT_REQUEST_TYPES = HARD_UNAVAILABLE_TYPES | {"assign"}
 SOFT_DEFAULT_REQUEST_TYPES = {"prefer_off", "prefer_work"}
+RECURRING_PREFERENCE_TYPES = {"prefer_off", "prefer_work"}
 PRIORITIES = {"hard", "soft"}
 SCHEDULE_RULE_TYPES = {"weekday_count", "weekday_pair_count", "away_rotation"}
 WEEKEND_WEEKDAYS = {4, 5, 6}
@@ -290,12 +291,163 @@ def default_priority_for_request_type(request_type: str) -> str:
 	return "hard"
 
 
+def get_recurring_preferences_for_editor() -> pd.DataFrame:
+	preferences = read_sql(
+		"""
+		SELECT rp.id, rp.resident_id, r.name AS resident,
+			rp.request_type, rp.weekday, rp.effective_start_date, rp.effective_end_date,
+			rp.priority, rp.reason, r.active AS resident_active
+		FROM recurring_preferences rp
+		JOIN residents r ON r.id = rp.resident_id
+		ORDER BY rp.effective_start_date, r.name, rp.weekday, rp.request_type, rp.id
+		"""
+	)
+	columns = [
+		"id",
+		"resident_id",
+		"resident",
+		"request_type",
+		"weekday",
+		"effective_start_date",
+		"effective_end_date",
+		"priority",
+		"reason",
+		"resident_active",
+	]
+	if preferences.empty:
+		return pd.DataFrame(columns=columns)
+	preferences["effective_start_date"] = pd.to_datetime(preferences["effective_start_date"]).dt.date
+	preferences["effective_end_date"] = pd.to_datetime(preferences["effective_end_date"], errors="coerce").dt.date
+	return preferences[columns]
+
+
+def get_recurring_preferences_for_period(period_id: int) -> pd.DataFrame:
+	month_start, month_end = period_date_bounds(period_id)
+	return read_sql(
+		"""
+		SELECT rp.id, rp.resident_id, r.name AS resident_name,
+			rp.request_type, rp.weekday, rp.effective_start_date, rp.effective_end_date,
+			rp.priority, rp.reason, rp.updated_at
+		FROM recurring_preferences rp
+		JOIN residents r ON r.id = rp.resident_id
+		WHERE r.active = 1
+		  AND rp.effective_start_date <= ?
+		  AND (rp.effective_end_date IS NULL OR rp.effective_end_date >= ?)
+		ORDER BY rp.effective_start_date, r.name, rp.weekday, rp.request_type, rp.id
+		""",
+		(month_end, month_start),
+	)
+
+
+def create_recurring_preference(
+	resident_id: int,
+	request_type: str,
+	weekday: int,
+	effective_start_date: date | str,
+	effective_end_date: date | str | None = None,
+	reason: str | None = None,
+) -> int:
+	request_type, weekday, start, end = _coerce_recurring_preference_values(
+		request_type,
+		weekday,
+		effective_start_date,
+		effective_end_date,
+	)
+	active_resident_ids = set(get_residents(active_only=True)["id"].astype(int).tolist())
+	if int(resident_id) not in active_resident_ids:
+		raise ValueError("Select a valid active resident.")
+	with get_connection() as conn:
+		cursor = conn.execute(
+			"""
+			INSERT INTO recurring_preferences (
+				resident_id, request_type, weekday, effective_start_date, effective_end_date, priority, reason
+			)
+			VALUES (?, ?, ?, ?, ?, 'soft', ?)
+			RETURNING id
+			""",
+			(int(resident_id), request_type, weekday, start.isoformat(), end.isoformat() if end else None, reason or ""),
+		)
+		return int(cursor.fetchone()["id"])
+
+
+def update_recurring_preference(
+	preference_id: int,
+	resident_id: int,
+	request_type: str,
+	weekday: int,
+	effective_start_date: date | str,
+	effective_end_date: date | str | None = None,
+	reason: str | None = None,
+) -> None:
+	request_type, weekday, start, end = _coerce_recurring_preference_values(
+		request_type,
+		weekday,
+		effective_start_date,
+		effective_end_date,
+	)
+	with get_connection() as conn:
+		current = conn.execute(
+			"SELECT resident_id FROM recurring_preferences WHERE id = ?",
+			(int(preference_id),),
+		).fetchone()
+	if current is None:
+		raise ValueError(f"Recurring preference #{preference_id} was not found.")
+	active_resident_ids = set(get_residents(active_only=True)["id"].astype(int).tolist())
+	if int(resident_id) not in active_resident_ids and int(resident_id) != int(current["resident_id"]):
+		raise ValueError("Select a valid active resident.")
+	with get_connection() as conn:
+		conn.execute(
+			"""
+			UPDATE recurring_preferences
+			SET resident_id = ?, request_type = ?, weekday = ?, effective_start_date = ?,
+				effective_end_date = ?, priority = 'soft', reason = ?, updated_at = CURRENT_TIMESTAMP
+			WHERE id = ?
+			""",
+			(
+				int(resident_id),
+				request_type,
+				weekday,
+				start.isoformat(),
+				end.isoformat() if end else None,
+				reason or "",
+				int(preference_id),
+			),
+		)
+
+
+def delete_recurring_preference(preference_id: int) -> None:
+	with get_connection() as conn:
+		conn.execute("DELETE FROM recurring_preferences WHERE id = ?", (int(preference_id),))
+
+
+def _coerce_recurring_preference_values(
+	request_type: str,
+	weekday: int,
+	effective_start_date: date | str,
+	effective_end_date: date | str | None,
+) -> tuple[str, int, date, date | None]:
+	request_type = str(request_type or "").strip().lower()
+	if request_type not in RECURRING_PREFERENCE_TYPES:
+		raise ValueError("Recurring preferences must be prefer_off or prefer_work.")
+	weekday = int(weekday)
+	if weekday < 0 or weekday > 6:
+		raise ValueError("Weekday must be between 0 and 6.")
+	start = _coerce_date(effective_start_date, "Start date")
+	end = None
+	if effective_end_date not in (None, "") and not pd.isna(effective_end_date):
+		end = _coerce_date(effective_end_date, "End date")
+		if end < start:
+			raise ValueError("End date cannot be before start date.")
+	return request_type, weekday, start, end
+
+
 def get_schedule_requests_for_period(period_id: int) -> pd.DataFrame:
 	month_start, month_end = period_date_bounds(period_id)
 	return read_sql(
 		"""
 		SELECT sr.id, sr.resident_id, r.name AS resident_name,
-			sr.start_date, sr.end_date, sr.request_type, sr.priority, sr.reason
+			sr.start_date, sr.end_date, sr.request_type, sr.priority, sr.reason,
+			sr.updated_at, r.active AS resident_active
 		FROM schedule_requests sr
 		JOIN residents r ON r.id = sr.resident_id
 		WHERE sr.start_date <= ? AND sr.end_date >= ?
@@ -311,7 +463,17 @@ def get_schedule_requests(period_id: int) -> pd.DataFrame:
 
 def get_schedule_requests_for_editor(period_id: int) -> pd.DataFrame:
 	requests = get_schedule_requests_for_period(period_id)
-	columns = ["id", "resident_id", "resident", "start_date", "end_date", "request_type", "priority", "reason"]
+	columns = [
+		"id",
+		"resident_id",
+		"resident",
+		"start_date",
+		"end_date",
+		"request_type",
+		"priority",
+		"reason",
+		"resident_active",
+	]
 	if requests.empty:
 		return pd.DataFrame(columns=columns)
 
@@ -434,8 +596,12 @@ def update_schedule_request(
 	priority = str(priority_value).strip().lower()
 	if priority not in PRIORITIES:
 		raise ValueError(f"Invalid priority '{priority_value}'.")
+	with get_connection() as conn:
+		current = conn.execute("SELECT resident_id FROM schedule_requests WHERE id = ?", (int(request_id),)).fetchone()
+	if current is None:
+		raise ValueError(f"Availability/preference #{request_id} was not found.")
 	active_resident_ids = set(get_residents(active_only=True)["id"].astype(int).tolist())
-	if int(resident_id) not in active_resident_ids:
+	if int(resident_id) not in active_resident_ids and int(resident_id) != int(current["resident_id"]):
 		raise ValueError("Select a valid active resident.")
 
 	expanded_rows = _expanded_request_conflict_rows(int(resident_id), start, end, request_type, priority)
@@ -463,10 +629,19 @@ def delete_schedule_request(request_id: int) -> None:
 
 def get_expanded_schedule_requests(period_id: int) -> pd.DataFrame:
 	requests = get_schedule_requests_for_period(period_id)
+	recurring = get_recurring_preferences_for_period(period_id)
 	period = get_period(period_id)
 	valid_dates = set(period_dates(period_id))
+	month_start = date(int(period["year"]), int(period["month"]), 1)
+	month_end = date(
+		int(period["year"]),
+		int(period["month"]),
+		calendar.monthrange(int(period["year"]), int(period["month"]))[1],
+	)
 	rows: list[dict] = []
 	for request in requests.itertuples():
+		if not bool(request.resident_active):
+			continue
 		start = date.fromisoformat(str(request.start_date))
 		end = date.fromisoformat(str(request.end_date))
 		for work_date in _date_range(start, end):
@@ -480,7 +655,9 @@ def get_expanded_schedule_requests(period_id: int) -> pd.DataFrame:
 					"request_type": request.request_type,
 					"priority": request.priority,
 					"reason": request.reason,
-					"source": "user",
+					"source": "dated",
+					"source_id": int(request.id),
+					"updated_at": request.updated_at,
 				}
 			)
 		if str(request.request_type).lower() == "vacation":
@@ -495,12 +672,71 @@ def get_expanded_schedule_requests(period_id: int) -> pd.DataFrame:
 						"priority": "soft",
 						"reason": "Auto preference: Thursday before vacation starts",
 						"source": "derived",
+						"source_id": int(request.id),
+						"updated_at": request.updated_at,
 					}
 				)
-	return pd.DataFrame(
-		rows,
-		columns=["resident_id", "resident_name", "work_date", "request_type", "priority", "reason", "source"],
+
+	if not recurring.empty:
+		for preference in recurring.itertuples():
+			start = max(date.fromisoformat(str(preference.effective_start_date)), month_start)
+			end = date.fromisoformat(str(preference.effective_end_date)) if pd.notna(preference.effective_end_date) else month_end
+			end = min(end, month_end)
+			for work_date in _date_range(start, end):
+				if work_date.weekday() != int(preference.weekday) or work_date.isoformat() not in valid_dates:
+					continue
+				rows.append(
+					{
+						"resident_id": int(preference.resident_id),
+						"resident_name": preference.resident_name,
+						"work_date": work_date.isoformat(),
+						"request_type": preference.request_type,
+						"priority": "soft",
+						"reason": preference.reason,
+						"source": "recurring",
+						"source_id": int(preference.id),
+						"updated_at": preference.updated_at,
+					}
+				)
+
+	columns = ["resident_id", "resident_name", "work_date", "request_type", "priority", "reason", "source"]
+	if not rows:
+		return pd.DataFrame(columns=columns)
+
+	expanded = pd.DataFrame(rows)
+	expanded["request_type"] = expanded["request_type"].astype(str).str.lower()
+	expanded["priority"] = expanded["priority"].astype(str).str.lower()
+
+	# An explicitly dated preference owns that resident/date and suppresses weekly recurrences.
+	dated_positions = set(
+		expanded.loc[
+			(expanded["source"] == "dated") & expanded["request_type"].isin(RECURRING_PREFERENCE_TYPES),
+			["resident_id", "work_date"],
+		].itertuples(index=False, name=None)
 	)
+	if dated_positions:
+		recurring_mask = expanded["source"].eq("recurring")
+		suppressed = pd.Series(
+			[(int(row.resident_id), str(row.work_date)) in dated_positions for row in expanded.itertuples()],
+			index=expanded.index,
+		)
+		expanded = expanded.loc[~(recurring_mask & suppressed)].copy()
+
+	preferences = expanded[expanded["request_type"].isin(RECURRING_PREFERENCE_TYPES)].copy()
+	other_requests = expanded[~expanded["request_type"].isin(RECURRING_PREFERENCE_TYPES)].copy()
+	if not preferences.empty:
+		preferences["priority_rank"] = preferences["priority"].map({"soft": 0, "hard": 1}).fillna(0)
+		preferences["source_rank"] = preferences["source"].map({"recurring": 0, "derived": 1, "dated": 2}).fillna(0)
+		preferences["updated_rank"] = pd.to_datetime(preferences["updated_at"], errors="coerce", utc=True)
+		preferences = preferences.sort_values(
+			["resident_id", "work_date", "request_type", "priority_rank", "source_rank", "updated_rank", "source_id"],
+			ascending=[True, True, True, False, False, False, False],
+		)
+		preferences = preferences.drop_duplicates(["resident_id", "work_date", "request_type"], keep="first")
+
+	normalized = pd.concat([other_requests, preferences], ignore_index=True)
+	normalized = normalized.sort_values(["work_date", "resident_name", "request_type", "source_id"])
+	return normalized[columns].reset_index(drop=True)
 
 
 def get_schedule_rules(period_id: int) -> pd.DataFrame:
@@ -875,11 +1111,11 @@ def _validate_schedule_request_conflicts(expanded_rows: list[dict]) -> None:
 	requests = pd.DataFrame(expanded_rows)
 	hard_assignments = requests[
 		(requests["priority"].str.lower() == "hard")
-		& (requests["request_type"].str.lower() == "assign")
+		& (requests["request_type"].str.lower().isin({"assign", "prefer_work"}))
 	]
 	hard_unavailable = requests[
 		(requests["priority"].str.lower() == "hard")
-		& (requests["request_type"].str.lower().isin(HARD_UNAVAILABLE_TYPES))
+		& (requests["request_type"].str.lower().isin(HARD_UNAVAILABLE_TYPES | {"prefer_off"}))
 	]
 	if hard_assignments.empty or hard_unavailable.empty:
 		return
@@ -887,7 +1123,7 @@ def _validate_schedule_request_conflicts(expanded_rows: list[dict]) -> None:
 	if not conflicts.empty:
 		row = conflicts.iloc[0]
 		raise ValueError(
-			f"Conflicting hard requests: resident is assigned and unavailable on {row['work_date']}."
+			f"Conflicting hard requests: resident must work and is unavailable/off on {row['work_date']}."
 		)
 
 
@@ -1290,7 +1526,7 @@ def _validate_manual_assignment(
 			(requests["resident_id"].astype(int) == int(resident_id))
 			& (requests["work_date"].astype(str) == str(work_date))
 			& (requests["priority"].str.lower() == "hard")
-			& (requests["request_type"].str.lower().isin(HARD_UNAVAILABLE_TYPES))
+			& (requests["request_type"].str.lower().isin(HARD_UNAVAILABLE_TYPES | {"prefer_off"}))
 		]
 		if not hard_unavailable.empty:
 			raise ValueError("Selected resident is hard unavailable on that date.")

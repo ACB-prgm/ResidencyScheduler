@@ -17,13 +17,16 @@ Residents are the people eligible for call scheduling.
 
 ## Availability and Preferences
 
-Availability and Preferences are date-based entries. An entry can cover one date or a date range, and ranges can cross month boundaries. Cross-month entries appear on every selected month they overlap.
+Availability and Preferences can be dated entries or recurring weekly preferences. Dated entries can cover one date or a date range, and ranges can cross month boundaries. Cross-month entries appear on every selected month they overlap.
 
 - `vacation`, `unavailable`, `approved_absence`, and `medical_leave` default to hard.
 - `assign` defaults to hard and forces the resident onto the selected date.
 - `prefer_off` and `prefer_work` default to soft.
+- Recurring `prefer_off` and `prefer_work` entries apply weekly on one weekday, either indefinitely or through an end date, and are always soft.
 - Hard availability and preferences must be honored by the solver.
 - Soft availability and preferences affect the solver objective but can be violated if needed.
+- A dated preference overrides a recurring preference for the same resident and date. Duplicate preferences are evaluated once.
+- `Description` is optional context shown with the saved entry.
 
 Vacation ranges automatically add a soft `prefer_work` preference for the Thursday before vacation starts when that Thursday is inside the selected month.
 

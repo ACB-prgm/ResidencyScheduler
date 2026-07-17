@@ -15,7 +15,7 @@ from residency_scheduler import repository
 
 T = TypeVar("T")
 CACHE_KEY_VERSION = "v4"
-SCHEMA_INIT_VERSION = "schedule-requests-global-v1"
+SCHEMA_INIT_VERSION = "recurring-preferences-v1"
 
 
 def ensure_database_initialized() -> bool:
@@ -122,6 +122,18 @@ def _get_cached_schedule_requests_for_editor(database_url: str, period_id: int) 
 	)
 
 
+def get_cached_recurring_preferences_for_editor() -> pd.DataFrame:
+	return _get_cached_recurring_preferences_for_editor(get_database_url())
+
+
+@st.cache_data(show_spinner=False)
+def _get_cached_recurring_preferences_for_editor(database_url: str) -> pd.DataFrame:
+	return _read_through_local_cache(
+		"reference:recurring_preferences_editor",
+		repository.get_recurring_preferences_for_editor,
+	)
+
+
 def get_cached_schedule_rules_for_editor(period_id: int) -> pd.DataFrame:
 	return _get_cached_schedule_rules_for_editor(get_database_url(), period_id)
 
@@ -211,14 +223,24 @@ def clear_reference_data_cache() -> None:
 	_get_cached_residents.clear()
 	_get_cached_resident_options.clear()
 	_get_cached_resident_access_snapshot.clear()
+	_get_cached_recurring_preferences_for_editor.clear()
 	_clear_local_cache_prefix("reference:")
 
 
 def clear_schedule_request_cache() -> None:
 	"""Clear request-derived views without evicting unrelated month data."""
 	_get_cached_schedule_requests_for_editor.clear()
+	_get_cached_recurring_preferences_for_editor.clear()
+	_get_cached_preference_violations.clear()
 	_get_cached_month_context.clear()
-	_clear_local_cache_patterns(["%:requests_editor", "%:context"])
+	_clear_local_cache_patterns(
+		[
+			"%:requests_editor",
+			"%:preference_violations",
+			"%:context",
+			"%:reference:recurring_preferences_editor",
+		]
+	)
 
 
 def clear_month_data_cache() -> None:

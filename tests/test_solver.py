@@ -7,6 +7,7 @@ import pytest
 
 from residency_scheduler.db import init_db
 from residency_scheduler.repository import (
+	create_recurring_preference,
 	create_schedule_request,
 	get_or_create_schedule_period,
 	get_assignments,
@@ -275,6 +276,107 @@ def test_preference_heavy_schedule_remains_feasible_and_reports_violations(isola
 	assert result.status in {"OPTIMAL", "FEASIBLE"}
 	assert len(result.assignments) == 28
 	assert set(get_preference_violations(period_id).columns) >= {"work_date", "resident_name", "request_type"}
+
+
+def test_recurring_preferences_expand_only_matching_weekdays_and_bounds(isolated_db):
+	add_residents(["Ada", "Ben", "Cam", "Dee"], max_shifts=12)
+	period_id = get_or_create_schedule_period(2026, 9, required_count=1)
+	create_recurring_preference(1, "prefer_off", 0, "2026-09-08", "2026-09-22", "Monday preference")
+
+	expanded = get_expanded_schedule_requests(period_id)
+	ada = expanded[(expanded["resident_id"] == 1) & (expanded["request_type"] == "prefer_off")]
+
+	assert ada["work_date"].tolist() == ["2026-09-14", "2026-09-21"]
+	assert set(ada["source"]) == {"recurring"}
+
+
+def test_dated_preference_overrides_recurring_on_same_date(isolated_db):
+	add_residents(["Ada", "Ben", "Cam", "Dee"], max_shifts=12)
+	period_id = get_or_create_schedule_period(2026, 9, required_count=1)
+	create_recurring_preference(1, "prefer_off", 0, "2026-09-01", None, "Recurring off")
+	create_schedule_request(1, "2026-09-14", "2026-09-14", "prefer_work", "soft", "Dated work")
+
+	expanded = get_expanded_schedule_requests(period_id)
+	selected = expanded[(expanded["resident_id"] == 1) & (expanded["work_date"] == "2026-09-14")]
+
+	assert len(selected) == 1
+	assert selected.iloc[0]["request_type"] == "prefer_work"
+	assert selected.iloc[0]["source"] == "dated"
+
+
+def test_duplicate_dated_preferences_collapse_and_hard_wins(isolated_db):
+	add_residents(["Ada", "Ben", "Cam", "Dee"], max_shifts=12)
+	period_id = get_or_create_schedule_period(2026, 9, required_count=1)
+	create_schedule_request(1, "2026-09-14", "2026-09-14", "prefer_off", "soft", "Soft duplicate")
+	create_schedule_request(1, "2026-09-14", "2026-09-14", "prefer_off", "hard", "Hard duplicate")
+
+	expanded = get_expanded_schedule_requests(period_id)
+	selected = expanded[
+		(expanded["resident_id"] == 1)
+		& (expanded["work_date"] == "2026-09-14")
+		& (expanded["request_type"] == "prefer_off")
+	]
+
+	assert len(selected) == 1
+	assert selected.iloc[0]["priority"] == "hard"
+	assert selected.iloc[0]["reason"] == "Hard duplicate"
+
+
+def test_duplicate_recurring_preferences_create_one_effective_penalty_and_violation(isolated_db):
+	add_residents(["Ada", "Ben"], max_shifts=31)
+	period_id = get_or_create_schedule_period(2026, 9, required_count=2)
+	create_recurring_preference(1, "prefer_off", 0, "2026-09-01", None, "First")
+	create_recurring_preference(1, "prefer_off", 0, "2026-09-01", None, "Second")
+
+	expanded = get_expanded_schedule_requests(period_id)
+	monday = expanded[
+		(expanded["resident_id"] == 1)
+		& (expanded["work_date"] == "2026-09-07")
+		& (expanded["request_type"] == "prefer_off")
+	]
+	assert len(monday) == 1
+
+	result = solve_period(period_id, max_time_seconds=5)
+	violations = get_preference_violations(period_id)
+	assert result.status in {"OPTIMAL", "FEASIBLE"}
+	assert len(violations[(violations["resident_name"] == "Ada") & (violations["work_date"].astype(str) == "2026-09-07")]) == 1
+
+
+def test_hard_dated_prefer_work_and_prefer_off_are_enforced(isolated_db):
+	add_residents(["Ada", "Ben", "Cam", "Dee"], max_shifts=12)
+	period_id = get_or_create_schedule_period(2026, 9, required_count=1)
+	create_schedule_request(1, "2026-09-10", "2026-09-10", "prefer_work", "hard", "Must work")
+	create_schedule_request(1, "2026-09-11", "2026-09-11", "prefer_off", "hard", "Must be off")
+
+	result = solve_period(period_id, max_time_seconds=5)
+	assignments = assignments_by_date(period_id)
+
+	assert result.status in {"OPTIMAL", "FEASIBLE"}
+	assert assignments["2026-09-10"] == [1]
+	assert 1 not in assignments["2026-09-11"]
+	stored = get_assignments(period_id)
+	forced = stored[(stored["work_date"].astype(str) == "2026-09-10") & (stored["resident_id"].astype(int) == 1)].iloc[0]
+	assert forced["source"] == "request"
+	assert int(forced["is_locked"]) == 1
+
+
+def test_inactive_resident_preferences_do_not_enter_solver_inputs(isolated_db):
+	add_residents(["Ada", "Ben", "Cam", "Dee"], max_shifts=12)
+	period_id = get_or_create_schedule_period(2026, 9, required_count=1)
+	create_recurring_preference(1, "prefer_off", 0, "2026-09-01", None, "Recurring")
+	create_schedule_request(1, "2026-09-14", "2026-09-14", "prefer_off", "soft", "Dated")
+	residents = pd.DataFrame(
+		[
+			{"id": 1, "name": "Ada", "email": "ada@example.com", "max_shifts": 12, "min_shifts": None, "weight": 1, "active": 0},
+			{"id": 2, "name": "Ben", "email": "ben@example.com", "max_shifts": 12, "min_shifts": None, "weight": 1, "active": 1},
+			{"id": 3, "name": "Cam", "email": "cam@example.com", "max_shifts": 12, "min_shifts": None, "weight": 1, "active": 1},
+			{"id": 4, "name": "Dee", "email": "dee@example.com", "max_shifts": 12, "min_shifts": None, "weight": 1, "active": 1},
+		]
+	)
+	save_residents(residents)
+
+	expanded = get_expanded_schedule_requests(period_id)
+	assert 1 not in set(expanded["resident_id"].astype(int).tolist())
 
 
 def test_back_to_back_is_avoided_when_enough_residents_exist(isolated_db):

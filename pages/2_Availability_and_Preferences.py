@@ -2,228 +2,466 @@ from __future__ import annotations
 
 from datetime import date
 
+import pandas as pd
 import streamlit as st
 
 from residency_scheduler.auth import current_user_is_allowed
 from residency_scheduler.cache import (
 	clear_schedule_request_cache,
 	get_cached_period,
-	get_cached_resident_options,
+	get_cached_recurring_preferences_for_editor,
 	get_cached_residents,
 	get_cached_schedule_requests_for_editor,
 )
 from residency_scheduler.repository import (
+	WEEKDAYS,
+	WEEKDAY_NAMES,
+	create_recurring_preference,
 	create_schedule_request,
 	default_priority_for_request_type,
+	delete_recurring_preference,
 	delete_schedule_request,
+	update_recurring_preference,
 	update_schedule_request,
 )
-from residency_scheduler.ui import flash_success, render_page_header, render_user_guide
+from residency_scheduler.ui import (
+	flash_success,
+	render_card_action_styles,
+	render_page_header,
+	render_user_guide,
+)
+
+REQUEST_TYPE_OPTIONS = [
+	"vacation",
+	"unavailable",
+	"approved_absence",
+	"medical_leave",
+	"prefer_off",
+	"prefer_work",
+	"assign",
+]
+RECURRING_TYPE_OPTIONS = ["prefer_off", "prefer_work"]
+
+
+def _display_type(value: str) -> str:
+	return str(value).replace("_", " ").title()
+
+
+def _filter_rows(frame: pd.DataFrame, resident: str, search: str, fields: list[str]) -> pd.DataFrame:
+	filtered = frame.copy()
+	if resident != "All residents":
+		filtered = filtered[filtered["resident"].astype(str) == resident]
+	query = search.strip().casefold()
+	if query and not filtered.empty:
+		search_text = filtered[fields].fillna("").astype(str).agg(" ".join, axis=1).str.casefold()
+		filtered = filtered[search_text.str.contains(query, regex=False)]
+	return filtered
+
+
+def _resident_options(residents: pd.DataFrame, active_only: bool) -> dict[str, int]:
+	options: dict[str, int] = {}
+	for row in residents.sort_values("name").itertuples():
+		if active_only and not bool(row.active):
+			continue
+		label = str(row.name) if bool(row.active) else f"{row.name} (inactive)"
+		options[label] = int(row.id)
+	return options
+
+
+def _resident_label_for_id(options: dict[str, int], resident_id: int) -> str:
+	for label, option_id in options.items():
+		if int(option_id) == int(resident_id):
+			return label
+	raise ValueError(f"Resident #{resident_id} is not available.")
+
 
 period_id = render_page_header(
 	"Availability and Preferences",
-	"Enter availability, preferences, vacation ranges, and hard preassignments for the selected month.",
+	"Add dated availability or reusable weekly preferences.",
 	month_location="requests",
 )
 render_user_guide(
 	"Availability and Preferences",
 	"""
-	Use this page to add dated availability and preference entries for the selected month.
+	Use **Dated** for one date or a date range. Use **Recurring** for weekly prefer-off or prefer-work patterns.
 
 	- **Availability type:** vacation, unavailable, approved absence, medical leave, prefer off, prefer work, or assign.
-	- **Resident:** the resident the entry applies to.
-	- **Start/End date:** one date or a date range. Ranges may cross month boundaries.
-	- **Priority:** hard entries must be honored; soft entries affect the solver score but can be violated if needed.
-	- **Reason:** optional note shown with the entry.
+	- **Dates:** dated ranges may cross month boundaries and appear in every month they overlap.
+	- **Recurring preference:** applies on one weekday from its start date, either indefinitely or through an end date.
+	- **Priority:** hard entries must be honored. Soft entries influence the schedule but may be missed when needed. Dated prefer off/work defaults to soft; recurring preferences are always soft.
+	- **Description:** optional context shown with the saved entry.
 
-	Vacation, unavailable, approved absence, medical leave, and assign default to hard. Prefer off and prefer work default to soft. Vacation ranges automatically add a soft prefer-work preference on the Thursday before vacation starts when that Thursday is inside the selected month.
+	Vacation, unavailable, approved absence, medical leave, and assign default to hard. Vacation ranges also add a soft prefer-work preference on the Thursday before vacation begins when that Thursday is in the generated month. A dated preference takes precedence over a recurring preference on the same resident and date. Duplicate preferences are evaluated once.
 
-	The Current Availability list shows saved entries that overlap the selected month. Use **Delete** on an entry to remove it everywhere it appears.
+	Deleting a dated or recurring entry removes only that saved entry. Recurring entries remain visible if a resident becomes inactive, but inactive residents are not included in solver inputs.
 	""",
 )
-residents = get_cached_residents(active_only=True)
+render_card_action_styles()
 
-if residents.empty:
+all_residents = get_cached_residents(active_only=False)
+active_residents = all_residents[all_residents["active"].astype(bool)].copy() if not all_residents.empty else all_residents
+if active_residents.empty:
 	st.warning("Add active residents before entering availability and preferences.")
 	st.stop()
 
-resident_options = get_cached_resident_options(active_only=True)
-request_type_options = ["vacation", "unavailable", "approved_absence", "medical_leave", "prefer_off", "prefer_work", "assign"]
+active_resident_options = _resident_options(all_residents, active_only=True)
+all_resident_options = _resident_options(all_residents, active_only=False)
 period = get_cached_period(period_id)
-default_request_date = date(int(period["year"]), int(period["month"]), 1)
-edit_request_key = f"edit_request_id_{period_id}"
-pending_request_form_key = f"pending_request_form_{period_id}"
-request_type_key = f"request_type_{period_id}"
-resident_key = f"request_resident_{period_id}"
-start_date_key = f"request_start_{period_id}"
-end_date_key = f"request_end_{period_id}"
-priority_key = f"request_priority_{period_id}"
-reason_key = f"request_reason_{period_id}"
-pending_request_form = st.session_state.pop(pending_request_form_key, None)
-if pending_request_form is not None:
-	if pending_request_form["edit_request_id"] is None:
-		st.session_state.pop(edit_request_key, None)
-	else:
-		st.session_state[edit_request_key] = int(pending_request_form["edit_request_id"])
-	st.session_state[request_type_key] = pending_request_form["request_type"]
-	st.session_state[resident_key] = pending_request_form["resident"]
-	st.session_state[start_date_key] = pending_request_form["start_date"]
-	st.session_state[end_date_key] = pending_request_form["end_date"]
-	st.session_state[priority_key] = pending_request_form["priority"]
-	st.session_state[reason_key] = pending_request_form["reason"]
-if request_type_key not in st.session_state:
-	st.session_state[request_type_key] = request_type_options[0]
-if resident_key not in st.session_state:
-	st.session_state[resident_key] = next(iter(resident_options))
-if start_date_key not in st.session_state:
-	st.session_state[start_date_key] = default_request_date
-if end_date_key not in st.session_state:
-	st.session_state[end_date_key] = default_request_date
-if priority_key not in st.session_state:
-	st.session_state[priority_key] = default_priority_for_request_type(st.session_state[request_type_key])
-if reason_key not in st.session_state:
-	st.session_state[reason_key] = ""
-if st.session_state[end_date_key] < st.session_state[start_date_key]:
-	st.session_state[end_date_key] = st.session_state[start_date_key]
+default_date = date(int(period["year"]), int(period["month"]), 1)
+dated = get_cached_schedule_requests_for_editor(period_id)
+recurring = get_cached_recurring_preferences_for_editor()
 
-
-def _resident_label_for_id(resident_id: int) -> str:
-	for label, option_resident_id in resident_options.items():
-		if int(option_resident_id) == int(resident_id):
-			return label
-	return next(iter(resident_options))
-
-
-existing = get_cached_schedule_requests_for_editor(period_id)
-if "id" not in existing.columns or "resident_id" not in existing.columns:
-	clear_schedule_request_cache()
-	st.rerun()
 metric_cols = st.columns(3)
-metric_cols[0].metric("Active residents", len(residents))
-metric_cols[1].metric("Active availability", len(existing))
-metric_cols[2].metric("Availability types", int(existing["request_type"].nunique()) if not existing.empty else 0)
+metric_cols[0].metric("Active residents", len(active_residents))
+metric_cols[1].metric("Dated this month", len(dated))
+metric_cols[2].metric("Recurring preferences", len(recurring))
 
-form_col, availability_col = st.columns([1, 1], gap="large")
-edit_request_id = st.session_state.get(edit_request_key)
-is_editing = edit_request_id is not None
-if is_editing and int(edit_request_id) not in set(existing["id"].astype(int)):
-	st.session_state.pop(edit_request_key, None)
-	edit_request_id = None
-	is_editing = False
+dated_tab, recurring_tab = st.tabs(
+	["Dated", "Recurring"],
+	default="Dated",
+	key="availability_preference_tabs",
+	on_change="rerun",
+)
 
+with dated_tab:
+	form_col, list_col = st.columns([1, 1], gap="large")
+	edit_key = f"dated_preference_edit_{period_id}"
+	pending_key = f"dated_preference_pending_{period_id}"
+	type_key = f"dated_type_{period_id}"
+	resident_key = f"dated_resident_{period_id}"
+	start_key = f"dated_start_{period_id}"
+	end_key = f"dated_end_{period_id}"
+	priority_key = f"dated_priority_{period_id}"
+	description_key = f"dated_description_{period_id}"
 
-def _sync_default_priority() -> None:
-	if st.session_state.get(edit_request_key) is None:
-		st.session_state[priority_key] = default_priority_for_request_type(st.session_state[request_type_key])
+	pending = st.session_state.pop(pending_key, None)
+	if pending is not None:
+		if pending["id"] is None:
+			st.session_state.pop(edit_key, None)
+		else:
+			st.session_state[edit_key] = int(pending["id"])
+		st.session_state[type_key] = pending["request_type"]
+		st.session_state[resident_key] = pending["resident"]
+		st.session_state[start_key] = pending["start_date"]
+		st.session_state[end_key] = pending["end_date"]
+		st.session_state[priority_key] = pending["priority"]
+		st.session_state[description_key] = pending["reason"]
 
+	st.session_state.setdefault(type_key, REQUEST_TYPE_OPTIONS[0])
+	st.session_state.setdefault(resident_key, next(iter(active_resident_options)))
+	st.session_state.setdefault(start_key, default_date)
+	st.session_state.setdefault(end_key, default_date)
+	st.session_state.setdefault(priority_key, default_priority_for_request_type(st.session_state[type_key]))
+	st.session_state.setdefault(description_key, "")
+	if st.session_state[end_key] < st.session_state[start_key]:
+		st.session_state[end_key] = st.session_state[start_key]
 
-def _sync_end_date() -> None:
-	if st.session_state[end_date_key] < st.session_state[start_date_key]:
-		st.session_state[end_date_key] = st.session_state[start_date_key]
+	edit_id = st.session_state.get(edit_key)
+	is_editing = edit_id is not None and not dated.empty and int(edit_id) in set(dated["id"].astype(int))
+	if edit_id is not None and not is_editing:
+		st.session_state.pop(edit_key, None)
+		edit_id = None
+	form_resident_options = all_resident_options if is_editing else active_resident_options
 
+	def queue_dated_reset() -> None:
+		st.session_state[pending_key] = {
+			"id": None,
+			"request_type": REQUEST_TYPE_OPTIONS[0],
+			"resident": next(iter(active_resident_options)),
+			"start_date": default_date,
+			"end_date": default_date,
+			"priority": default_priority_for_request_type(REQUEST_TYPE_OPTIONS[0]),
+			"reason": "",
+		}
 
-def _queue_request_form_reset() -> None:
-	st.session_state[pending_request_form_key] = {
-		"edit_request_id": None,
-		"request_type": request_type_options[0],
-		"resident": next(iter(resident_options)),
-		"start_date": default_request_date,
-		"end_date": default_request_date,
-		"priority": default_priority_for_request_type(request_type_options[0]),
-		"reason": "",
-	}
+	def load_dated(row: pd.Series) -> None:
+		st.session_state[pending_key] = {
+			"id": int(row["id"]),
+			"request_type": str(row["request_type"]),
+			"resident": _resident_label_for_id(all_resident_options, int(row["resident_id"])),
+			"start_date": row["start_date"],
+			"end_date": row["end_date"],
+			"priority": str(row["priority"]),
+			"reason": str(row["reason"] or ""),
+		}
 
+	def sync_dated_priority() -> None:
+		if st.session_state.get(edit_key) is None:
+			st.session_state[priority_key] = default_priority_for_request_type(st.session_state[type_key])
 
-def _load_request_for_edit(row) -> None:
-	st.session_state[pending_request_form_key] = {
-		"edit_request_id": int(row["id"]),
-		"request_type": str(row["request_type"]),
-		"resident": _resident_label_for_id(int(row["resident_id"])),
-		"start_date": row["start_date"],
-		"end_date": row["end_date"],
-		"priority": str(row["priority"]),
-		"reason": str(row["reason"] or ""),
-	}
+	def sync_dated_end() -> None:
+		if st.session_state[end_key] < st.session_state[start_key]:
+			st.session_state[end_key] = st.session_state[start_key]
 
-@st.fragment
-def _render_availability_form() -> None:
-	if not current_user_is_allowed():
-		st.rerun(scope="app")
-	st.subheader("Edit Availability" if is_editing else "+ Add Availability")
-	selected_request_type = st.selectbox(
-		"Availability type",
-		request_type_options,
-		key=request_type_key,
-		on_change=_sync_default_priority,
-	)
-	selected_resident = st.selectbox("Resident", list(resident_options.keys()), key=resident_key)
-	start_date = st.date_input("Start date", key=start_date_key, on_change=_sync_end_date)
-	end_date = st.date_input("End date", min_value=start_date, key=end_date_key)
-	priority = st.selectbox("Priority", ["hard", "soft"], key=priority_key)
-	reason = st.text_input("Reason", key=reason_key)
-
-	button_cols = st.columns([1, 1]) if is_editing else [st.container()]
-	save_clicked = button_cols[0].button("Save changes" if is_editing else "Add availability or preference", type="primary")
-	cancel_clicked = is_editing and button_cols[1].button("Cancel")
-	if cancel_clicked:
-		_queue_request_form_reset()
-		st.rerun(scope="app")
-
-	if save_clicked:
+	@st.fragment
+	def render_dated_form() -> None:
+		if not current_user_is_allowed():
+			st.rerun(scope="app")
+		st.subheader("Edit Dated Availability" if is_editing else "+ Add Dated Availability")
+		request_type = st.selectbox("Availability type", REQUEST_TYPE_OPTIONS, key=type_key, on_change=sync_dated_priority)
+		resident_label = st.selectbox("Resident", list(form_resident_options), key=resident_key)
+		start_date = st.date_input("Start date", key=start_key, on_change=sync_dated_end)
+		end_date = st.date_input("End date", min_value=start_date, key=end_key)
+		priority = st.selectbox("Priority", ["hard", "soft"], key=priority_key)
+		description = st.text_input("Description", key=description_key)
+		buttons = st.columns([1, 1]) if is_editing else [st.container()]
+		save = buttons[0].button(
+			"Save changes" if is_editing else "Add availability or preference",
+			type="primary",
+			width="stretch",
+		)
+		cancel = is_editing and buttons[1].button("Cancel", width="stretch")
+		if cancel:
+			queue_dated_reset()
+			st.rerun(scope="app")
+		if not save:
+			return
 		try:
 			if is_editing:
 				update_schedule_request(
-					request_id=int(edit_request_id),
-					resident_id=resident_options[selected_resident],
-					start_date=start_date,
-					end_date=end_date,
-					request_type=selected_request_type,
-					priority=priority,
-					reason=reason,
+					int(edit_id),
+					form_resident_options[resident_label],
+					start_date,
+					end_date,
+					request_type,
+					priority,
+					description,
 				)
 			else:
 				create_schedule_request(
-					resident_id=resident_options[selected_resident],
-					start_date=start_date,
-					end_date=end_date,
-					request_type=selected_request_type,
-					priority=priority,
-					reason=reason,
+					form_resident_options[resident_label],
+					start_date,
+					end_date,
+					request_type,
+					priority,
+					description,
 				)
 		except ValueError as exc:
 			st.error(str(exc))
 		else:
-			_queue_request_form_reset()
+			queue_dated_reset()
 			clear_schedule_request_cache()
-			flash_success("Availability and preferences saved.")
+			flash_success("Dated availability or preference saved.")
 			st.rerun(scope="app")
 
+	with form_col:
+		render_dated_form()
 
-with form_col:
-	_render_availability_form()
+	with list_col:
+		st.subheader("Current Dated Availability")
+		filter_col, search_col = st.columns([1, 1])
+		resident_filter = filter_col.selectbox(
+			"Filter resident",
+			["All residents"] + sorted(dated["resident"].astype(str).unique().tolist()) if not dated.empty else ["All residents"],
+			key=f"dated_filter_{period_id}",
+		)
+		search = search_col.text_input("Search", key=f"dated_search_{period_id}", placeholder="Type, priority, description...")
+		shown = dated.copy()
+		if not shown.empty:
+			shown["status"] = shown["resident_active"].map({1: "active", 0: "inactive", True: "active", False: "inactive"})
+			shown = _filter_rows(shown, resident_filter, search, ["resident", "request_type", "priority", "status", "reason"])
+			shown = shown.sort_values(["start_date", "resident", "request_type", "id"])
+		if shown.empty:
+			st.info("No dated availability or preferences match this view.")
+		else:
+			for _, row in shown.iterrows():
+				with st.container(border=True):
+					details, actions = st.columns([2.2, 1], gap="medium")
+					with details:
+						inactive = " · Inactive" if not bool(row["resident_active"]) else ""
+						st.markdown(f"**{row['resident']}**{inactive}")
+						st.write(_display_type(row["request_type"]))
+						date_label = row["start_date"] if row["start_date"] == row["end_date"] else f"{row['start_date']} to {row['end_date']}"
+						st.caption(f"Dates: {date_label}")
+						st.caption(f"Priority: {str(row['priority']).title()}")
+						if row["reason"]:
+							st.caption(f"Description: {row['reason']}")
+					with actions:
+						if st.button("Edit", key=f"edit_dated_{int(row['id'])}", width="stretch"):
+							load_dated(row)
+							st.rerun()
+						if st.button("Delete", key=f"delete_dated_{int(row['id'])}", width="stretch"):
+							delete_schedule_request(int(row["id"]))
+							if st.session_state.get(edit_key) == int(row["id"]):
+								queue_dated_reset()
+							clear_schedule_request_cache()
+							flash_success("Dated availability or preference deleted.")
+							st.rerun()
 
-with availability_col:
-	st.subheader("Current Availability")
-	if existing.empty:
-		st.info("No availability or preferences have been added for this month.")
-	else:
-		for index, row in existing.reset_index(drop=True).iterrows():
-			with st.container(border=True):
-				summary_col, action_col = st.columns([5, 1])
-				date_label = row["start_date"] if row["start_date"] == row["end_date"] else f"{row['start_date']} to {row['end_date']}"
-				summary_col.markdown(f"**{row['resident']}** · {row['request_type']} · {date_label}")
-				details = [f"Priority: {row['priority']}"]
-				if row["reason"]:
-					details.append(f"Reason: {row['reason']}")
-				summary_col.caption(" · ".join(details))
-				with action_col:
-					if st.button("Edit", key=f"edit_request_{int(row['id'])}"):
-						_load_request_for_edit(row)
-						st.rerun()
-					if st.button("Delete", key=f"delete_request_{int(row['id'])}"):
-						delete_schedule_request(int(row["id"]))
-						if st.session_state.get(edit_request_key) == int(row["id"]):
-							_queue_request_form_reset()
-						clear_schedule_request_cache()
-						flash_success("Availability and preferences saved.")
-						st.rerun()
+with recurring_tab:
+	form_col, list_col = st.columns([1, 1], gap="large")
+	edit_key = "recurring_preference_edit"
+	pending_key = "recurring_preference_pending"
+	type_key = "recurring_type"
+	resident_key = "recurring_resident"
+	weekday_key = "recurring_weekday"
+	start_key = "recurring_start"
+	duration_key = "recurring_duration"
+	end_key = "recurring_end"
+	description_key = "recurring_description"
+
+	pending = st.session_state.pop(pending_key, None)
+	if pending is not None:
+		if pending["id"] is None:
+			st.session_state.pop(edit_key, None)
+		else:
+			st.session_state[edit_key] = int(pending["id"])
+		st.session_state[type_key] = pending["request_type"]
+		st.session_state[resident_key] = pending["resident"]
+		st.session_state[weekday_key] = pending["weekday"]
+		st.session_state[start_key] = pending["start_date"]
+		st.session_state[duration_key] = pending["duration"]
+		st.session_state[end_key] = pending["end_date"]
+		st.session_state[description_key] = pending["reason"]
+
+	st.session_state.setdefault(type_key, RECURRING_TYPE_OPTIONS[0])
+	st.session_state.setdefault(resident_key, next(iter(active_resident_options)))
+	st.session_state.setdefault(weekday_key, "Monday")
+	st.session_state.setdefault(start_key, default_date)
+	st.session_state.setdefault(duration_key, "Indefinite")
+	st.session_state.setdefault(end_key, default_date)
+	st.session_state.setdefault(description_key, "")
+	if st.session_state[end_key] < st.session_state[start_key]:
+		st.session_state[end_key] = st.session_state[start_key]
+
+	edit_id = st.session_state.get(edit_key)
+	is_editing = edit_id is not None and not recurring.empty and int(edit_id) in set(recurring["id"].astype(int))
+	if edit_id is not None and not is_editing:
+		st.session_state.pop(edit_key, None)
+		edit_id = None
+	form_resident_options = all_resident_options if is_editing else active_resident_options
+
+	def queue_recurring_reset() -> None:
+		st.session_state[pending_key] = {
+			"id": None,
+			"request_type": RECURRING_TYPE_OPTIONS[0],
+			"resident": next(iter(active_resident_options)),
+			"weekday": "Monday",
+			"start_date": default_date,
+			"duration": "Indefinite",
+			"end_date": default_date,
+			"reason": "",
+		}
+
+	def load_recurring(row: pd.Series) -> None:
+		end_date = row["effective_end_date"]
+		bounded = pd.notna(end_date)
+		st.session_state[pending_key] = {
+			"id": int(row["id"]),
+			"request_type": str(row["request_type"]),
+			"resident": _resident_label_for_id(all_resident_options, int(row["resident_id"])),
+			"weekday": WEEKDAY_NAMES[int(row["weekday"])],
+			"start_date": row["effective_start_date"],
+			"duration": "Ends on date" if bounded else "Indefinite",
+			"end_date": end_date if bounded else row["effective_start_date"],
+			"reason": str(row["reason"] or ""),
+		}
+
+	def sync_recurring_end() -> None:
+		if st.session_state[end_key] < st.session_state[start_key]:
+			st.session_state[end_key] = st.session_state[start_key]
+
+	@st.fragment
+	def render_recurring_form() -> None:
+		if not current_user_is_allowed():
+			st.rerun(scope="app")
+		st.subheader("Edit Recurring Preference" if is_editing else "+ Add Recurring Preference")
+		request_type = st.selectbox("Preference type", RECURRING_TYPE_OPTIONS, key=type_key, format_func=_display_type)
+		resident_label = st.selectbox("Resident", list(form_resident_options), key=resident_key)
+		weekday_label = st.selectbox("Weekday", list(WEEKDAYS), key=weekday_key)
+		start_date = st.date_input("Start date", key=start_key, on_change=sync_recurring_end)
+		duration = st.segmented_control("Duration", ["Indefinite", "Ends on date"], key=duration_key)
+		end_date = None
+		if duration == "Ends on date":
+			end_date = st.date_input("End date", min_value=start_date, key=end_key)
+		description = st.text_input("Description", key=description_key)
+		st.caption("Priority: Soft")
+		buttons = st.columns([1, 1]) if is_editing else [st.container()]
+		save = buttons[0].button(
+			"Save changes" if is_editing else "Add recurring preference",
+			type="primary",
+			width="stretch",
+		)
+		cancel = is_editing and buttons[1].button("Cancel", width="stretch")
+		if cancel:
+			queue_recurring_reset()
+			st.rerun(scope="app")
+		if not save:
+			return
+		try:
+			if is_editing:
+				update_recurring_preference(
+					int(edit_id),
+					form_resident_options[resident_label],
+					request_type,
+					WEEKDAYS[weekday_label],
+					start_date,
+					end_date,
+					description,
+				)
+			else:
+				create_recurring_preference(
+					form_resident_options[resident_label],
+					request_type,
+					WEEKDAYS[weekday_label],
+					start_date,
+					end_date,
+					description,
+				)
+		except ValueError as exc:
+			st.error(str(exc))
+		else:
+			queue_recurring_reset()
+			clear_schedule_request_cache()
+			flash_success("Recurring preference saved.")
+			st.rerun(scope="app")
+
+	with form_col:
+		render_recurring_form()
+
+	with list_col:
+		st.subheader("Current Recurring Preferences")
+		filter_col, search_col = st.columns([1, 1])
+		resident_filter = filter_col.selectbox(
+			"Filter resident",
+			["All residents"] + sorted(recurring["resident"].astype(str).unique().tolist()) if not recurring.empty else ["All residents"],
+			key="recurring_filter",
+		)
+		search = search_col.text_input("Search", key="recurring_search", placeholder="Weekday, type, description...")
+		shown = recurring.copy()
+		if not shown.empty:
+			shown["weekday_name"] = shown["weekday"].map(WEEKDAY_NAMES)
+			shown["status"] = shown["resident_active"].map({1: "active", 0: "inactive", True: "active", False: "inactive"})
+			shown = _filter_rows(
+				shown,
+				resident_filter,
+				search,
+				["resident", "request_type", "weekday_name", "priority", "status", "reason"],
+			)
+			shown = shown.sort_values(["effective_start_date", "resident", "weekday", "request_type", "id"])
+		if shown.empty:
+			st.info("No recurring preferences match this view.")
+		else:
+			for _, row in shown.iterrows():
+				with st.container(border=True):
+					details, actions = st.columns([2.2, 1], gap="medium")
+					with details:
+						inactive = " · Inactive" if not bool(row["resident_active"]) else ""
+						st.markdown(f"**{row['resident']}**{inactive}")
+						st.write(_display_type(row["request_type"]))
+						end_label = row["effective_end_date"] if pd.notna(row["effective_end_date"]) else "Indefinite"
+						st.caption(f"Every {WEEKDAY_NAMES[int(row['weekday'])]} · {row['effective_start_date']} to {end_label}")
+						st.caption("Priority: Soft")
+						if row["reason"]:
+							st.caption(f"Description: {row['reason']}")
+					with actions:
+						if st.button("Edit", key=f"edit_recurring_{int(row['id'])}", width="stretch"):
+							load_recurring(row)
+							st.rerun()
+						if st.button("Delete", key=f"delete_recurring_{int(row['id'])}", width="stretch"):
+							delete_recurring_preference(int(row["id"]))
+							if st.session_state.get(edit_key) == int(row["id"]):
+								queue_recurring_reset()
+							clear_schedule_request_cache()
+							flash_success("Recurring preference deleted.")
+							st.rerun()

@@ -6,8 +6,10 @@ import pytest
 from residency_scheduler.colors import RESIDENT_COLOR_PALETTE
 from residency_scheduler.db import get_connection, init_db
 from residency_scheduler.repository import (
+	create_recurring_preference,
 	create_schedule_rule,
 	create_schedule_request,
+	delete_recurring_preference,
 	delete_schedule_request,
 	get_or_create_schedule_period,
 	get_assignment_calendar,
@@ -15,6 +17,7 @@ from residency_scheduler.repository import (
 	get_assignments,
 	get_period,
 	get_prior_assignment_history,
+	get_recurring_preferences_for_editor,
 	get_resident_options,
 	get_residents,
 	get_user_default_google_calendar_id,
@@ -31,6 +34,7 @@ from residency_scheduler.repository import (
 	seed_months,
 	swap_assignment_residents,
 	update_assignment_resident,
+	update_recurring_preference,
 	update_schedule_request,
 	update_schedule_period_settings,
 	update_schedule_rule,
@@ -99,7 +103,76 @@ def test_empty_request_editor_has_no_placeholder_rows(isolated_db):
 	editor = get_schedule_requests_for_editor(period_id)
 
 	assert editor.empty
-	assert list(editor.columns) == ["id", "resident_id", "resident", "start_date", "end_date", "request_type", "priority", "reason"]
+	assert list(editor.columns) == [
+		"id",
+		"resident_id",
+		"resident",
+		"start_date",
+		"end_date",
+		"request_type",
+		"priority",
+		"reason",
+		"resident_active",
+	]
+
+
+def test_recurring_schema_initialization_is_non_destructive(isolated_db):
+	save_residents(
+		pd.DataFrame(
+			[{"name": "Ada", "email": "", "max_shifts": 10, "min_shifts": None, "weight": 1, "active": 1}]
+		)
+	)
+	request_id = create_schedule_request(1, "2026-09-01", "2026-09-01", "prefer_off", "hard", "Existing")
+
+	init_db()
+	init_db()
+
+	with get_connection() as conn:
+		row = conn.execute("SELECT * FROM schedule_requests WHERE id = ?", (request_id,)).fetchone()
+		tables = {item["name"] for item in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()}
+	assert "recurring_preferences" in tables
+	assert row["priority"] == "hard"
+	assert row["reason"] == "Existing"
+
+
+def test_recurring_preference_crud_and_soft_priority(isolated_db):
+	save_residents(
+		pd.DataFrame(
+			[{"name": "Ada", "email": "", "max_shifts": 10, "min_shifts": None, "weight": 1, "active": 1}]
+		)
+	)
+	preference_id = create_recurring_preference(1, "prefer_off", 0, "2026-09-01", None, "Mondays")
+
+	created = get_recurring_preferences_for_editor().iloc[0]
+	assert int(created["id"]) == preference_id
+	assert created["priority"] == "soft"
+	assert pd.isna(created["effective_end_date"])
+
+	update_recurring_preference(preference_id, 1, "prefer_work", 2, "2026-09-02", "2026-12-31", "Wednesdays")
+	updated = get_recurring_preferences_for_editor().iloc[0]
+	assert updated["request_type"] == "prefer_work"
+	assert int(updated["weekday"]) == 2
+	assert str(updated["effective_end_date"]) == "2026-12-31"
+	assert updated["reason"] == "Wednesdays"
+
+	delete_recurring_preference(preference_id)
+	assert get_recurring_preferences_for_editor().empty
+
+
+def test_recurring_preference_validates_type_weekday_dates_and_active_resident(isolated_db):
+	save_residents(
+		pd.DataFrame(
+			[{"name": "Ada", "email": "", "max_shifts": 10, "min_shifts": None, "weight": 1, "active": 0}]
+		)
+	)
+	with pytest.raises(ValueError, match="active resident"):
+		create_recurring_preference(1, "prefer_off", 0, "2026-09-01")
+	with pytest.raises(ValueError, match="prefer_off or prefer_work"):
+		create_recurring_preference(1, "vacation", 0, "2026-09-01")
+	with pytest.raises(ValueError, match="Weekday"):
+		create_recurring_preference(1, "prefer_off", 7, "2026-09-01")
+	with pytest.raises(ValueError, match="End date"):
+		create_recurring_preference(1, "prefer_off", 0, "2026-09-10", "2026-09-01")
 
 
 def test_schedule_requests_are_not_period_owned(isolated_db):
