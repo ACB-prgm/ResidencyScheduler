@@ -17,13 +17,16 @@ Residents are the people eligible for call scheduling.
 
 ## Availability and Preferences
 
-Availability and Preferences are date-based entries. An entry can cover one date or a date range, and ranges can cross month boundaries. Cross-month entries appear on every selected month they overlap.
+Availability and Preferences can be dated entries or recurring weekly preferences. Dated entries can cover one date or a date range, and ranges can cross month boundaries. Cross-month entries appear on every selected month they overlap.
 
 - `vacation`, `unavailable`, `approved_absence`, and `medical_leave` default to hard.
 - `assign` defaults to hard and forces the resident onto the selected date.
 - `prefer_off` and `prefer_work` default to soft.
+- Recurring `prefer_off` and `prefer_work` entries apply weekly on one weekday, either indefinitely or through an end date, and are always soft.
 - Hard availability and preferences must be honored by the solver.
 - Soft availability and preferences affect the solver objective but can be violated if needed.
+- A dated preference overrides a recurring preference for the same resident and date. Duplicate preferences are evaluated once.
+- `Description` is optional context shown with the saved entry.
 
 Vacation ranges automatically add a soft `prefer_work` preference for the Thursday before vacation starts when that Thursday is inside the selected month.
 
@@ -66,18 +69,25 @@ Weekend shifts are Friday, Saturday, and Sunday. The solver balances these weeke
 
 ## Generate Schedule
 
-Generate Schedule runs the solver for the selected month. The page shows:
+Generate Schedule runs the solver for the selected month. The solver max time is an upper limit; the solver may finish sooner. Running the solver again replaces the current local assignments, including manual edits. The objective score is a weighted penalty score: lower is better when comparing repeated runs with the same month and unchanged inputs, but scores should not be compared across different months or inputs.
+
+The page shows:
 
 - Solver controls and recent run status
-- Calendar view
+- A read-only, color-coded calendar using the call shift's start date
 - Workload summary
-  - Month shows only the selected month, L3M shows the selected month plus the prior two months, and YTD shows January through the selected month.
-- Preference violations
-- Manual reassign and swap tools
+  - Month shows only the selected month, L3M shows the selected month plus the prior two months, and YTD shows January through the selected month. Only saved assignments contribute.
+  - Weekend shifts are Friday, Saturday, and Sunday.
+- Soft prefer-off violations
+- Manual reassign and swap tools for unlocked assignments
 - ICS export
 - Google Calendar publishing
 
-Manual reassignments and swaps validate hard unavailable conflicts before saving.
+Manual reassignments and swaps validate hard unavailable conflicts before saving. The optional hard assign setting creates dated hard assign requests that remain in effect on future solver runs.
+
+### Wiping a Local Schedule
+
+**Wipe current schedule** permanently deletes only the selected month's local assignments, including manual edits. It does not delete residents, availability/preferences, recurring preferences, scheduling rules, hard assign requests, or solver run history. It also does not delete Google Calendar events. If the schedule was published, use **Wipe Scheduler Events** in the Google Calendar section before wiping the local schedule.
 
 ## Calendar Export and Publishing
 
@@ -85,4 +95,8 @@ ICS export downloads a single calendar file named for the selected year-month ca
 
 Google Calendar publishing writes the current month to a selected writable Google Calendar. Publishing deletes prior Residency Scheduler events for the selected month and calendar before inserting the current assignments. The app identifies its own events using private Google Calendar metadata, so it does not wipe unrelated calendar events.
 
-The selected Google Calendar is remembered as your default for future months. Use Wipe Scheduler Events when you need to remove the app-generated events for the selected year-month without publishing a replacement schedule.
+The selected Google Calendar is remembered as your default for future months. Google events are all-day events on the shift start date. Residents with saved email addresses are added as attendees and receive Google invitation/update emails. Use **Refresh Google Calendar status** to recheck the selected calendar. Use **Wipe Scheduler Events** when you need to remove app-generated events for the selected year-month without changing the local schedule or publishing a replacement.
+
+ICS export is a one-time download, not a live sync. Its events use the 6:00 PM start and 7:00 AM next-day end times.
+
+Developer details retains the latest solver result and warnings for troubleshooting, including after a local schedule wipe.

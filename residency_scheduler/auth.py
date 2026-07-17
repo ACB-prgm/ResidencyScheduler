@@ -106,13 +106,24 @@ def require_google_auth(render_sidebar: bool = True) -> dict[str, Any]:
 
 
 def sign_out() -> None:
+	session = st.session_state.get(AUTH_SESSION_KEY)
+	google_sub = str((session or {}).get("google_sub") or "") if isinstance(session, dict) else ""
+	if not google_sub:
+		profile = _current_identity_profile()
+		google_sub = str((profile or {}).get("sub") or "")
+	if google_sub:
+		delete_stored_google_token(google_sub)
 	st.session_state.pop(AUTH_SESSION_KEY, None)
 	st.session_state.pop(OAUTH_STATE_KEY, None)
 	st.session_state.pop(AUTHORIZATION_CACHE_KEY, None)
-	try:
-		st.logout()
-	except Exception:
-		st.rerun()
+	st.logout()
+
+
+def delete_stored_google_token(google_sub: str) -> None:
+	"""Remove durable Calendar credentials and obsolete remembered sessions."""
+	with get_connection() as conn:
+		conn.execute("DELETE FROM google_oauth_tokens WHERE google_sub = ?", (str(google_sub),))
+		conn.execute("DELETE FROM google_auth_sessions WHERE google_sub = ?", (str(google_sub),))
 
 
 def get_current_auth_session() -> dict[str, Any]:
@@ -175,6 +186,12 @@ def _render_auth_shell() -> None:
 
 def _render_identity_login() -> None:
 	_render_auth_shell()
+	if not _streamlit_oidc_is_configured():
+		st.error(
+			"Google sign-in is not configured. Add an [auth] section to Streamlit secrets "
+			"with redirect_uri, cookie_secret, client_id, client_secret, and server_metadata_url."
+		)
+		st.stop()
 	st.caption("Sign in with Google to continue.")
 	if st.button("Sign in with Google", type="primary"):
 		st.login()
@@ -757,7 +774,6 @@ def _render_signed_in_sidebar(session: dict[str, Any]) -> None:
 		st.caption(f"Signed in as {session.get('email', '')}")
 		if st.button("Sign out", key="google_sign_out"):
 			sign_out()
-			st.rerun()
 
 
 def _hide_unauthenticated_navigation() -> None:
@@ -782,6 +798,17 @@ def _streamlit_google_config() -> dict[str, Any]:
 	except Exception:
 		return {}
 	return dict(google) if hasattr(google, "items") else {}
+
+
+def _streamlit_oidc_is_configured() -> bool:
+	try:
+		auth_config = st.secrets.get("auth", {})
+	except Exception:
+		return False
+	if not hasattr(auth_config, "get"):
+		return False
+	required_keys = ("redirect_uri", "cookie_secret", "client_id", "client_secret", "server_metadata_url")
+	return all(str(auth_config.get(key) or "").strip() for key in required_keys)
 
 
 def _current_local_redirect_uri() -> str | None:

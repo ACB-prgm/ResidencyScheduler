@@ -427,6 +427,54 @@ def test_persist_authenticated_user_uses_client_secret_when_no_token_key(isolate
 	assert auth.decrypt_token_payload(token["encrypted_token_json"], "plain-client-secret") == token_payload
 
 
+def test_sign_out_deletes_stored_token_and_calls_streamlit_logout(isolated_auth_db, monkeypatch):
+	key = Fernet.generate_key().decode("utf-8")
+	config = auth.GoogleOAuthConfig(
+		client_id="client",
+		client_secret="secret",
+		redirect_uri="http://localhost:8501",
+		token_encryption_key=key,
+	)
+	profile = {"sub": "google-sub-1", "email": "user@example.org", "name": "Test User", "picture": ""}
+	token_payload = {"token": "access-token", "refresh_token": "refresh-token", "scopes": auth.GOOGLE_REQUIRED_SCOPES}
+	auth.persist_authenticated_user(profile, token_payload, config, allowed=True)
+	stub = AuthStreamlitStub()
+	stub.session_state[auth.AUTH_SESSION_KEY] = {
+		"google_sub": "google-sub-1",
+		"profile": profile,
+	}
+	monkeypatch.setattr(auth, "st", stub)
+
+	auth.sign_out()
+
+	with get_connection() as conn:
+		stored_token = conn.execute(
+			"SELECT encrypted_token_json FROM google_oauth_tokens WHERE google_sub = ?",
+			("google-sub-1",),
+		).fetchone()
+	assert stored_token is None
+	assert auth.AUTH_SESSION_KEY not in stub.session_state
+	assert stub.logout_called
+	assert not stub.rerun_called
+
+
+def test_oidc_configuration_requires_auth_section(monkeypatch):
+	stub = AuthStreamlitStub()
+	stub.secrets = {"google": {"client_id": "client"}}
+	monkeypatch.setattr(auth, "st", stub)
+
+	assert not auth._streamlit_oidc_is_configured()
+
+	stub.secrets["auth"] = {
+		"redirect_uri": "http://localhost:8501/oauth2callback",
+		"cookie_secret": "cookie-secret",
+		"client_id": "client",
+		"client_secret": "secret",
+		"server_metadata_url": "https://accounts.google.com/.well-known/openid-configuration",
+	}
+	assert auth._streamlit_oidc_is_configured()
+
+
 def test_restore_session_for_oidc_profile_uses_encrypted_stored_token(isolated_auth_db):
 	key = Fernet.generate_key().decode("utf-8")
 	config = auth.GoogleOAuthConfig(
@@ -596,6 +644,15 @@ class AuthStreamlitStub:
 	def __init__(self):
 		self.session_state = {}
 		self.query_params = {}
+		self.secrets = {
+			"auth": {
+				"redirect_uri": "http://localhost:8501/oauth2callback",
+				"cookie_secret": "cookie-secret",
+				"client_id": "client",
+				"client_secret": "secret",
+				"server_metadata_url": "https://accounts.google.com/.well-known/openid-configuration",
+			}
+		}
 		self.errors: list[str] = []
 		self.markdowns: list[str] = []
 		self.markdown_unsafe_flags: list[bool] = []
@@ -603,6 +660,8 @@ class AuthStreamlitStub:
 		self.images: list[str] = []
 		self.link_buttons: list[dict] = []
 		self.stopped = False
+		self.logout_called = False
+		self.rerun_called = False
 		self.sidebar = self
 
 	def __enter__(self):
@@ -643,6 +702,12 @@ class AuthStreamlitStub:
 	def stop(self):
 		self.stopped = True
 		raise StopException
+
+	def logout(self):
+		self.logout_called = True
+
+	def rerun(self):
+		self.rerun_called = True
 
 
 @pytest.fixture

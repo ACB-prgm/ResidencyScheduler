@@ -43,10 +43,28 @@ def render_page_header(title: str, caption: str, month_location: str | None = No
 	return None
 
 
-def render_user_guide(page_name: str, body: str, expanded: bool = False) -> None:
+def render_user_guide(page_name: str, body: str, expanded: bool = False, callout: str | None = None) -> None:
 	"""Render the page-level help section with a consistent label."""
 	with st.expander(f"User Guide: {page_name}", expanded=expanded):
+		if callout:
+			st.info(callout)
 		st.markdown(body)
+
+
+def render_card_action_styles() -> None:
+	"""Keep compact card actions readable as two-column layouts narrow."""
+	st.markdown(
+		"""
+		<style>
+		div[data-testid="stButton"] > button,
+		div[data-testid="stFormSubmitButton"] > button {
+			min-width: 6rem;
+			white-space: nowrap;
+		}
+		</style>
+		""",
+		unsafe_allow_html=True,
+	)
 
 
 def select_month(location: str = "global") -> tuple[int, int]:
