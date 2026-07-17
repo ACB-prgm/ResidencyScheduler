@@ -43,9 +43,11 @@ def render_page_header(title: str, caption: str, month_location: str | None = No
 	return None
 
 
-def render_user_guide(page_name: str, body: str, expanded: bool = False) -> None:
+def render_user_guide(page_name: str, body: str, expanded: bool = False, callout: str | None = None) -> None:
 	"""Render the page-level help section with a consistent label."""
 	with st.expander(f"User Guide: {page_name}", expanded=expanded):
+		if callout:
+			st.info(callout)
 		st.markdown(body)
 
 

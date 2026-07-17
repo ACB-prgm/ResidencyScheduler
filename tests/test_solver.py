@@ -5,7 +5,7 @@ from collections import Counter
 import pandas as pd
 import pytest
 
-from residency_scheduler.db import init_db
+from residency_scheduler.db import get_connection, init_db
 from residency_scheduler.repository import (
 	create_recurring_preference,
 	create_schedule_request,
@@ -225,6 +225,28 @@ def test_hard_assign_conflict_with_hard_unavailable_is_rejected(isolated_db):
 		)
 
 
+def test_solver_conflict_warnings_use_resident_names(isolated_db):
+	add_residents(["Ada", "Ben", "Cam", "Dee"], max_shifts=10)
+	period_id = get_or_create_schedule_period(2026, 8, required_count=1)
+	with get_connection() as conn:
+		conn.executemany(
+			"""
+			INSERT INTO schedule_requests (resident_id, start_date, end_date, request_type, priority, reason)
+			VALUES (?, ?, ?, ?, ?, ?)
+			""",
+			[
+				(1, "2026-08-14", "2026-08-14", "prefer_work", "hard", "Must work"),
+				(1, "2026-08-14", "2026-08-14", "unavailable", "hard", "Unavailable"),
+			],
+		)
+
+	result = solve_period(period_id, max_time_seconds=5)
+
+	assert result.status == "INVALID_INPUT"
+	assert any("Hard request conflict: Ada must work on 2026-08-14" in warning for warning in result.warnings)
+	assert all("resident_id" not in warning for warning in result.warnings)
+
+
 def test_too_many_hard_assign_requests_on_one_date_is_rejected(isolated_db):
 	add_residents(["Ada", "Ben", "Cam"], max_shifts=12)
 	period_id = get_or_create_schedule_period(2026, 5, required_count=1)
@@ -242,6 +264,8 @@ def test_too_many_hard_assign_requests_on_one_date_is_rejected(isolated_db):
 
 	assert result.status == "INVALID_INPUT"
 	assert any("hard assign request" in warning for warning in result.warnings)
+	assert any("Ada" in warning and "Ben" in warning for warning in result.warnings)
+	assert all("resident_id" not in warning for warning in result.warnings)
 
 
 def test_max_shifts_can_make_schedule_infeasible(isolated_db):
@@ -252,6 +276,8 @@ def test_max_shifts_can_make_schedule_infeasible(isolated_db):
 
 	assert result.status == "INVALID_INPUT"
 	assert any("Configured max shifts" in warning for warning in result.warnings)
+	assert any("Ada" in warning and "Ben" in warning for warning in result.warnings)
+	assert all("resident_id" not in warning for warning in result.warnings)
 
 
 def test_preference_heavy_schedule_remains_feasible_and_reports_violations(isolated_db):
@@ -779,3 +805,5 @@ def test_pair_rule_impossible_target_is_invalid_input(isolated_db):
 
 	assert result.status == "INVALID_INPUT"
 	assert any("available adjacent weekday pair" in warning for warning in result.warnings)
+	assert any("City Hope" in warning for warning in result.warnings)
+	assert all("resident_id" not in warning for warning in result.warnings)

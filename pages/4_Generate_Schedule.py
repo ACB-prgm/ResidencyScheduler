@@ -22,6 +22,7 @@ from residency_scheduler.cache import (
 	get_cached_workload_summary_for_scope,
 )
 from residency_scheduler.repository import (
+	delete_schedule_assignments,
 	get_user_default_google_calendar_id,
 	set_user_default_google_calendar_id,
 	swap_assignment_residents,
@@ -120,22 +121,32 @@ period_id = render_page_header(
 render_user_guide(
 	"Generate Schedule",
 	"""
-	Use this page to generate, review, adjust, and publish the selected month.
+	Use this page to generate, review, adjust, publish, export, or clear the selected month. The Year-Month selector controls every action on this page.
 
-	- **Run scheduler:** creates assignments for the month using active residents, availability, preferences, scheduling rules, and rolling fairness from prior months.
-	- **Calendar:** shows the generated schedule by date.
-	- **Workload summary:** shows total shifts, weekend shifts, hard assigned shifts, and manual shifts by resident.
-	  - Use the range selector to view the selected Month, L3M (selected month plus the prior two months), or YTD (January through the selected month).
-	- **Preference violations:** lists soft prefer-off entries that could not be honored.
-	- **Edit Assignment:** lets you manually reassign one unlocked assignment or swap residents between two unlocked assignments.
-	- **Google Calendar publishing:** writes the current schedule to a selected writable Google Calendar after deleting only prior Residency Scheduler events for the same month and calendar.
-	- **ICS export:** downloads a single call-schedule calendar file.
-	- **Developer details:** shows recent solver run diagnostics for troubleshooting.
+	### Generate and clear
+	- **Solver max time** is the maximum time the solver may search for a better result; it may finish sooner. Longer limits can improve difficult schedules.
+	- **Run scheduler** uses active residents, dated and recurring preferences, scheduling rules, and rolling fairness from prior months. Running it again replaces all current local assignments for the selected month, including manual edits.
+	- **Objective score** is a weighted penalty score. Lower is better for repeated runs with the same month and inputs, but scores should not be compared across different months or changed inputs.
+	- **Wipe current schedule** permanently deletes only the selected month's local assignments. It preserves residents, availability/preferences, scheduling rules, hard assign requests, and solver run history. It does not remove published Google Calendar events; wipe those first in the Google Calendar section when needed.
+
+	### Review and edit
+	- **Calendar** shows one color-coded, all-day display entry on each call shift's start date. It is read-only; use Edit Assignment for changes.
+	- **Workload summary** shows total shifts, Friday/Saturday/Sunday weekend shifts, hard assigned shifts, and manual shifts by resident.
+	  - **Month** uses the selected month, **L3M** uses the selected month plus the prior two months, and **YTD** uses January through the selected month. Only months with saved assignments contribute.
+	- **Preference violations** lists soft prefer-off requests that received an assignment. Hard requests cannot appear as violations because they are mandatory.
+	- **Edit Assignment** can reassign one unlocked assignment or swap two unlocked assignments. Selecting "Create hard assign request" also saves dated hard assign requests that remain in effect on future solver runs and survive a local schedule wipe.
+
+	### Publish and troubleshoot
+	- **Google Calendar publishing** remembers your selected writable calendar. Publishing deletes only prior Residency Scheduler events for this month in that calendar, then writes the current schedule as all-day events. Residents with email addresses are added as attendees and receive Google invitation/update emails.
+	- **Refresh Google Calendar status** checks the calendar again. **Wipe Scheduler Events** removes only app-generated events for this month from the selected Google Calendar and does not change the local schedule.
+	- **ICS export** downloads a one-time calendar file with 6:00 PM-7:00 AM shifts. Importing it does not create a live sync.
+	- **Developer details** retains the latest solver status, score, and warnings for troubleshooting, even after local assignments are wiped.
 	""",
 )
 month_context = get_cached_month_context(period_id)
 period = month_context["period"]
-max_time = st.slider("Solver max time, seconds", min_value=5, max_value=120, value=30, step=5)
+assignments = month_context["assignments"]
+max_time = st.slider("Solver max time, seconds", min_value=5, max_value=120, value=120, step=5)
 
 if st.button("Run scheduler", type="primary"):
 	with st.spinner("Generating schedule..."):
@@ -151,7 +162,28 @@ if st.button("Run scheduler", type="primary"):
 	clear_month_data_cache()
 	st.rerun()
 
-assignments = month_context["assignments"]
+with st.expander("Wipe current schedule"):
+	if assignments.empty:
+		st.info("No local assignments exist for the selected month.")
+	else:
+		month_label = f"{int(period['year'])}-{int(period['month']):02d}"
+		st.warning(
+			f"This permanently deletes {len(assignments)} local assignment(s) for {month_label}, including manual edits. "
+			"It does not delete Google Calendar events, availability/preferences, scheduling rules, hard assign requests, "
+			"or solver run history. Wipe published Google Calendar events first when needed."
+		)
+		confirmation_key = f"confirm_local_schedule_wipe_{period_id}"
+		confirmed = st.checkbox(
+			"I understand that the selected month's local assignments will be permanently deleted.",
+			key=confirmation_key,
+		)
+		if st.button("Delete local schedule", disabled=not confirmed):
+			deleted_count = delete_schedule_assignments(int(period_id))
+			st.session_state.pop(confirmation_key, None)
+			clear_month_data_cache()
+			flash_success(f"Deleted {deleted_count} local assignment(s) for {month_label}.")
+			st.rerun()
+
 if not assignments.empty:
 	calendar_col, workload_col = st.columns([2, 1], gap="large")
 	with calendar_col:

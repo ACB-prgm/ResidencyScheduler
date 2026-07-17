@@ -46,6 +46,10 @@ render_user_guide(
 	This version assumes one 6:00 PM-7:00 AM night shift per calendar day. The solver honors hard availability, preferences, and rules first, then balances total workload, Friday/Saturday/Sunday shifts, preferences, rolling fairness, and back-to-back shifts.
 	""",
 	expanded=True,
+	callout=(
+		"Every page has a User Guide at the top. Open it before using the page for explanations of its fields, "
+		"behavior, and examples."
+	),
 )
 
 period = get_cached_period(period_id)

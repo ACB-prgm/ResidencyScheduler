@@ -38,7 +38,7 @@ class SolverResult:
 	warnings: list[str]
 
 
-def solve_period(period_id: int, max_time_seconds: int = 30, random_seed: int | None = None) -> SolverResult:
+def solve_period(period_id: int, max_time_seconds: int = 120, random_seed: int | None = None) -> SolverResult:
 	period = get_period(period_id)
 	residents = get_residents(active_only=True)
 	requests = get_expanded_schedule_requests(period_id)
@@ -406,10 +406,19 @@ def _validate_inputs(
 	errors: list[str] = []
 	valid_residents = set(residents["id"].astype(int).tolist())
 	valid_dates = {item.isoformat() for item in dates}
+	resident_names = {
+		int(row.id): str(row.name)
+		for row in residents.itertuples()
+	}
+
+	def display_name(resident_id: int, fallback: str | None = None) -> str:
+		return resident_names.get(int(resident_id), str(fallback or "Unknown resident"))
 
 	if required_count > len(valid_residents):
+		active_names = ", ".join(sorted(resident_names.values())) or "none"
 		errors.append(
-			f"Each date requires {required_count} resident(s), but only {len(valid_residents)} active resident(s) exist."
+			f"Each date requires {required_count} resident(s), but only {len(valid_residents)} active resident(s) exist: "
+			f"{active_names}."
 		)
 
 	total_required = len(dates) * required_count
@@ -421,38 +430,48 @@ def _validate_inputs(
 		else:
 			has_unbounded_capacity = True
 	if not has_unbounded_capacity and configured_capacity < total_required:
+		capacity_details = ", ".join(
+			f"{row.name}: {int(row.max_shifts)}"
+			for row in residents.sort_values("name").itertuples()
+		)
 		errors.append(
-			f"Configured max shifts allow only {configured_capacity} total assignment(s), but the period requires {total_required}."
+			f"Configured max shifts allow only {configured_capacity} total assignment(s), but the period requires "
+			f"{total_required}. Resident limits: {capacity_details}."
 		)
 
 	for row in requests.itertuples():
+		resident_name = display_name(row.resident_id, getattr(row, "resident_name", None))
 		if int(row.resident_id) not in valid_residents:
-			errors.append(f"Request references inactive/missing resident_id {row.resident_id}.")
+			errors.append(f"Request references inactive or missing resident {resident_name}.")
 		if str(row.work_date) not in valid_dates:
-			errors.append(f"Request date {row.work_date} is outside the selected month.")
+			errors.append(f"{resident_name}'s request date {row.work_date} is outside the selected month.")
 
 	for row in rules.itertuples():
+		resident_name = display_name(row.resident_id, getattr(row, "resident_name", None))
 		if int(row.resident_id) not in valid_residents:
-			errors.append(f"Rule references inactive/missing resident_id {row.resident_id}.")
+			errors.append(f"Rule references inactive or missing resident {resident_name}.")
 		rule_type = str(row.rule_type).lower()
 		if rule_type not in SCHEDULE_RULE_TYPES:
-			errors.append("Only weekday_count, weekday_pair_count, and away_rotation rules are supported.")
+			errors.append(
+				f"{resident_name}'s rule is not supported. Use weekday_count, weekday_pair_count, or away_rotation."
+			)
 		if rule_type != "away_rotation" and str(row.comparator).lower() != "exactly":
-			errors.append("Only exactly rules are supported.")
+			errors.append(f"{resident_name}'s rule must use the exactly comparator.")
 		target_count = int(row.target_count)
 		if rule_type == "weekday_pair_count":
 			if pd.isna(row.paired_weekday):
-				errors.append("Paired weekday is required for weekday_pair_count rules.")
+				errors.append(f"{resident_name}'s weekday-pair rule requires a paired weekday.")
 				continue
 			weekday = int(row.weekday)
 			paired_weekday = int(row.paired_weekday)
 			if paired_weekday != (weekday + 1) % 7:
-				errors.append("Paired weekday rules must use adjacent weekdays.")
+				errors.append(f"{resident_name}'s paired weekday rule must use adjacent weekdays.")
 				continue
 			available_pairs = len(_paired_date_keys(dates, weekday, paired_weekday))
 			if target_count > available_pairs:
 				errors.append(
-					f"Rule target count {target_count} exceeds {available_pairs} available adjacent weekday pair(s)."
+					f"{resident_name}'s rule target count {target_count} exceeds "
+					f"{available_pairs} available adjacent weekday pair(s)."
 				)
 
 	hard_assignments = requests[
@@ -463,9 +482,13 @@ def _validate_inputs(
 		for work_date, group in hard_assignments.groupby("work_date"):
 			hard_work_count = group["resident_id"].astype(int).nunique()
 			if hard_work_count > required_count:
+				resident_list = ", ".join(
+					display_name(resident_id)
+					for resident_id in sorted(group["resident_id"].astype(int).unique())
+				)
 				errors.append(
 					f"{work_date} has {hard_work_count} hard assign request(s) or hard prefer-work request(s), "
-					f"but only requires {required_count} resident(s)."
+					f"but only requires {required_count} resident(s): {resident_list}."
 				)
 
 		for resident_id, group in hard_assignments.groupby("resident_id"):
@@ -473,7 +496,7 @@ def _validate_inputs(
 			hard_work_count = group["work_date"].astype(str).nunique()
 			if not matches.empty and pd.notna(matches.iloc[0]) and hard_work_count > int(matches.iloc[0]):
 				errors.append(
-					f"resident_id {resident_id} has {hard_work_count} hard work request(s), "
+					f"{display_name(resident_id)} has {hard_work_count} hard work request(s), "
 					f"exceeding max_shifts {int(matches.iloc[0])}."
 				)
 
@@ -485,7 +508,7 @@ def _validate_inputs(
 		conflicts = hard_assignments.merge(hard_unavailable, on=["resident_id", "work_date"], suffixes=("_assign", "_unavailable"))
 		for row in conflicts.itertuples():
 			errors.append(
-				f"Hard request conflict: resident_id {row.resident_id} must work on {row.work_date} "
+				f"Hard request conflict: {display_name(row.resident_id)} must work on {row.work_date} "
 				"but is marked hard unavailable/off."
 			)
 
@@ -506,6 +529,11 @@ def _validate_inputs(
 		}
 		available_count = len(valid_residents - unavailable_residents - away_blocked_residents)
 		if available_count < required_count:
-			errors.append(f"{work_date} has only {available_count} available resident(s), but requires {required_count}.")
+			blocked_residents = unavailable_residents | away_blocked_residents
+			blocked_names = ", ".join(display_name(resident_id) for resident_id in sorted(blocked_residents)) or "none"
+			errors.append(
+				f"{work_date} has only {available_count} available resident(s), but requires {required_count}. "
+				f"Blocked residents: {blocked_names}."
+			)
 
 	return errors

@@ -8,6 +8,7 @@ import streamlit as st
 from residency_scheduler.auth import current_user_is_allowed
 from residency_scheduler.cache import (
 	clear_schedule_request_cache,
+	get_cached_hard_schedule_requests_for_conflict_check,
 	get_cached_period,
 	get_cached_recurring_preferences_for_editor,
 	get_cached_residents,
@@ -21,6 +22,7 @@ from residency_scheduler.repository import (
 	default_priority_for_request_type,
 	delete_recurring_preference,
 	delete_schedule_request,
+	find_hard_schedule_request_conflicts,
 	update_recurring_preference,
 	update_schedule_request,
 )
@@ -45,6 +47,31 @@ RECURRING_TYPE_OPTIONS = ["prefer_off", "prefer_work"]
 
 def _display_type(value: str) -> str:
 	return str(value).replace("_", " ").title()
+
+
+def _display_date(value: date) -> str:
+	return f"{value.strftime('%B')} {value.day}, {value.year}"
+
+
+def _display_date_range(start_date: date, end_date: date) -> str:
+	if start_date == end_date:
+		return _display_date(start_date)
+	return f"{_display_date(start_date)} through {_display_date(end_date)}"
+
+
+def _hard_conflict_warning(candidate_type: str, conflicts: list[dict]) -> str:
+	lines = ["**Conflicting hard availability or preferences:**"]
+	for conflict in conflicts:
+		lines.append(
+			f"- **{conflict['resident_name']}**: hard {_display_type(candidate_type)} conflicts with saved hard "
+			f"{_display_type(conflict['request_type'])} on "
+			f"**{_display_date_range(conflict['overlap_start'], conflict['overlap_end'])}**."
+		)
+	lines.append(
+		"A hard entry cannot require the same resident to both work and be off. "
+		"Review **User Guide: Availability and Preferences** at the top of this page."
+	)
+	return "\n\n".join(lines)
 
 
 def _filter_rows(frame: pd.DataFrame, resident: str, search: str, fields: list[str]) -> pd.DataFrame:
@@ -86,10 +113,12 @@ render_user_guide(
 	Use **Dated** for one date or a date range. Use **Recurring** for weekly prefer-off or prefer-work patterns.
 
 	- **Availability type:** vacation, unavailable, approved absence, medical leave, prefer off, prefer work, or assign.
-	- **Dates:** dated ranges may cross month boundaries and appear in every month they overlap.
+	- **Dates:** start and end dates are inclusive and refer to the date the call shift starts. Dated ranges may cross month boundaries and appear in every month they overlap.
 	- **Recurring preference:** applies on one weekday from its start date, either indefinitely or through an end date.
 	- **Priority:** hard entries must be honored. Soft entries influence the schedule but may be missed when needed. Dated prefer off/work defaults to soft; recurring preferences are always soft.
 	- **Description:** optional context shown with the saved entry.
+
+	For a single shift, select the date that the shift starts; the end date remains the same automatically. For example, a shift beginning at 6:00 PM on August 14 and ending at 7:00 AM on August 15 is entered as **August 14 through August 14**. A range of **August 14 through August 16** includes the shifts starting on August 14, August 15, and August 16.
 
 	Vacation, unavailable, approved absence, medical leave, and assign default to hard. Vacation ranges also add a soft prefer-work preference on the Thursday before vacation begins when that Thursday is in the generated month. A dated preference takes precedence over a recurring preference on the same resident and date. Duplicate preferences are evaluated once.
 
@@ -109,6 +138,7 @@ all_resident_options = _resident_options(all_residents, active_only=False)
 period = get_cached_period(period_id)
 default_date = date(int(period["year"]), int(period["month"]), 1)
 dated = get_cached_schedule_requests_for_editor(period_id)
+hard_request_snapshot = get_cached_hard_schedule_requests_for_conflict_check()
 recurring = get_cached_recurring_preferences_for_editor()
 
 metric_cols = st.columns(3)
@@ -161,7 +191,6 @@ with dated_tab:
 	if edit_id is not None and not is_editing:
 		st.session_state.pop(edit_key, None)
 		edit_id = None
-	form_resident_options = all_resident_options if is_editing else active_resident_options
 
 	def queue_dated_reset() -> None:
 		st.session_state[pending_key] = {
@@ -193,34 +222,52 @@ with dated_tab:
 		if st.session_state[end_key] < st.session_state[start_key]:
 			st.session_state[end_key] = st.session_state[start_key]
 
-	@st.fragment
 	def render_dated_form() -> None:
 		if not current_user_is_allowed():
 			st.rerun(scope="app")
-		st.subheader("Edit Dated Availability" if is_editing else "+ Add Dated Availability")
+		current_edit_id = st.session_state.get(edit_key)
+		current_is_editing = (
+			current_edit_id is not None
+			and not dated.empty
+			and int(current_edit_id) in set(dated["id"].astype(int))
+		)
+		current_resident_options = all_resident_options if current_is_editing else active_resident_options
+		st.subheader("Edit Dated Availability" if current_is_editing else "+ Add Dated Availability")
 		request_type = st.selectbox("Availability type", REQUEST_TYPE_OPTIONS, key=type_key, on_change=sync_dated_priority)
-		resident_label = st.selectbox("Resident", list(form_resident_options), key=resident_key)
+		resident_label = st.selectbox("Resident", list(current_resident_options), key=resident_key)
 		start_date = st.date_input("Start date", key=start_key, on_change=sync_dated_end)
 		end_date = st.date_input("End date", min_value=start_date, key=end_key)
 		priority = st.selectbox("Priority", ["hard", "soft"], key=priority_key)
 		description = st.text_input("Description", key=description_key)
-		buttons = st.columns([1, 1]) if is_editing else [st.container()]
+		conflicts = find_hard_schedule_request_conflicts(
+			hard_request_snapshot,
+			current_resident_options[resident_label],
+			start_date,
+			end_date,
+			request_type,
+			priority,
+			exclude_request_id=int(current_edit_id) if current_is_editing else None,
+		)
+		if conflicts:
+			st.warning(_hard_conflict_warning(request_type, conflicts))
+		buttons = st.columns([1, 1]) if current_is_editing else [st.container()]
 		save = buttons[0].button(
-			"Save changes" if is_editing else "Add availability or preference",
+			"Save changes" if current_is_editing else "Add availability or preference",
 			type="primary",
 			width="stretch",
+			disabled=bool(conflicts),
 		)
-		cancel = is_editing and buttons[1].button("Cancel", width="stretch")
+		cancel = current_is_editing and buttons[1].button("Cancel", width="stretch")
 		if cancel:
 			queue_dated_reset()
 			st.rerun(scope="app")
 		if not save:
 			return
 		try:
-			if is_editing:
+			if current_is_editing:
 				update_schedule_request(
-					int(edit_id),
-					form_resident_options[resident_label],
+					int(current_edit_id),
+					current_resident_options[resident_label],
 					start_date,
 					end_date,
 					request_type,
@@ -229,7 +276,7 @@ with dated_tab:
 				)
 			else:
 				create_schedule_request(
-					form_resident_options[resident_label],
+					current_resident_options[resident_label],
 					start_date,
 					end_date,
 					request_type,
@@ -237,6 +284,9 @@ with dated_tab:
 					description,
 				)
 		except ValueError as exc:
+			if str(exc).startswith("Conflicting hard requests"):
+				clear_schedule_request_cache()
+				st.rerun(scope="app")
 			st.error(str(exc))
 		else:
 			queue_dated_reset()
@@ -329,7 +379,6 @@ with recurring_tab:
 	if edit_id is not None and not is_editing:
 		st.session_state.pop(edit_key, None)
 		edit_id = None
-	form_resident_options = all_resident_options if is_editing else active_resident_options
 
 	def queue_recurring_reset() -> None:
 		st.session_state[pending_key] = {
@@ -361,13 +410,19 @@ with recurring_tab:
 		if st.session_state[end_key] < st.session_state[start_key]:
 			st.session_state[end_key] = st.session_state[start_key]
 
-	@st.fragment
 	def render_recurring_form() -> None:
 		if not current_user_is_allowed():
 			st.rerun(scope="app")
-		st.subheader("Edit Recurring Preference" if is_editing else "+ Add Recurring Preference")
+		current_edit_id = st.session_state.get(edit_key)
+		current_is_editing = (
+			current_edit_id is not None
+			and not recurring.empty
+			and int(current_edit_id) in set(recurring["id"].astype(int))
+		)
+		current_resident_options = all_resident_options if current_is_editing else active_resident_options
+		st.subheader("Edit Recurring Preference" if current_is_editing else "+ Add Recurring Preference")
 		request_type = st.selectbox("Preference type", RECURRING_TYPE_OPTIONS, key=type_key, format_func=_display_type)
-		resident_label = st.selectbox("Resident", list(form_resident_options), key=resident_key)
+		resident_label = st.selectbox("Resident", list(current_resident_options), key=resident_key)
 		weekday_label = st.selectbox("Weekday", list(WEEKDAYS), key=weekday_key)
 		start_date = st.date_input("Start date", key=start_key, on_change=sync_recurring_end)
 		duration = st.segmented_control("Duration", ["Indefinite", "Ends on date"], key=duration_key)
@@ -376,23 +431,23 @@ with recurring_tab:
 			end_date = st.date_input("End date", min_value=start_date, key=end_key)
 		description = st.text_input("Description", key=description_key)
 		st.caption("Priority: Soft")
-		buttons = st.columns([1, 1]) if is_editing else [st.container()]
+		buttons = st.columns([1, 1]) if current_is_editing else [st.container()]
 		save = buttons[0].button(
-			"Save changes" if is_editing else "Add recurring preference",
+			"Save changes" if current_is_editing else "Add recurring preference",
 			type="primary",
 			width="stretch",
 		)
-		cancel = is_editing and buttons[1].button("Cancel", width="stretch")
+		cancel = current_is_editing and buttons[1].button("Cancel", width="stretch")
 		if cancel:
 			queue_recurring_reset()
 			st.rerun(scope="app")
 		if not save:
 			return
 		try:
-			if is_editing:
+			if current_is_editing:
 				update_recurring_preference(
-					int(edit_id),
-					form_resident_options[resident_label],
+					int(current_edit_id),
+					current_resident_options[resident_label],
 					request_type,
 					WEEKDAYS[weekday_label],
 					start_date,
@@ -401,7 +456,7 @@ with recurring_tab:
 				)
 			else:
 				create_recurring_preference(
-					form_resident_options[resident_label],
+					current_resident_options[resident_label],
 					request_type,
 					WEEKDAYS[weekday_label],
 					start_date,

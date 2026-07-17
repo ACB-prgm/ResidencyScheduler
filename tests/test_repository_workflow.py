@@ -9,8 +9,11 @@ from residency_scheduler.repository import (
 	create_recurring_preference,
 	create_schedule_rule,
 	create_schedule_request,
+	delete_schedule_assignments,
 	delete_recurring_preference,
 	delete_schedule_request,
+	find_hard_schedule_request_conflicts,
+	get_hard_schedule_requests_for_conflict_check,
 	get_or_create_schedule_period,
 	get_assignment_calendar,
 	get_calendar_months,
@@ -22,12 +25,14 @@ from residency_scheduler.repository import (
 	get_residents,
 	get_user_default_google_calendar_id,
 	get_schedule_rules,
+	get_schedule_runs,
 	get_schedule_periods,
 	get_schedule_requests_for_editor,
 	get_workload_summary,
 	get_workload_summary_for_scope,
 	replace_schedule_requests,
 	replace_schedule_rules,
+	record_solver_run,
 	save_assignments,
 	save_residents,
 	set_user_default_google_calendar_id,
@@ -116,6 +121,62 @@ def test_empty_request_editor_has_no_placeholder_rows(isolated_db):
 	]
 
 
+def test_hard_request_conflict_snapshot_and_evaluator_are_global(isolated_db):
+	save_residents(
+		pd.DataFrame(
+			[
+				{"name": "Ada", "email": "", "max_shifts": 10, "min_shifts": None, "weight": 1, "active": 1},
+				{"name": "Ben", "email": "", "max_shifts": 10, "min_shifts": None, "weight": 1, "active": 1},
+			]
+		)
+	)
+	vacation_id = create_schedule_request(1, "2026-08-30", "2026-09-03", "vacation", "hard", "PTO")
+	create_schedule_request(1, "2026-09-01", "2026-09-01", "prefer_off", "soft", "Soft")
+
+	snapshot = get_hard_schedule_requests_for_conflict_check()
+	conflicts = find_hard_schedule_request_conflicts(
+		snapshot,
+		resident_id=1,
+		start_date="2026-09-01",
+		end_date="2026-09-05",
+		request_type="assign",
+		priority="hard",
+	)
+
+	assert snapshot["id"].astype(int).tolist() == [vacation_id]
+	assert len(conflicts) == 1
+	assert conflicts[0]["resident_name"] == "Ada"
+	assert conflicts[0]["request_type"] == "vacation"
+	assert conflicts[0]["overlap_start"].isoformat() == "2026-09-01"
+	assert conflicts[0]["overlap_end"].isoformat() == "2026-09-03"
+
+
+def test_hard_request_conflict_evaluator_allows_soft_same_side_other_resident_and_self_edit(isolated_db):
+	save_residents(
+		pd.DataFrame(
+			[
+				{"name": "Ada", "email": "", "max_shifts": 10, "min_shifts": None, "weight": 1, "active": 1},
+				{"name": "Ben", "email": "", "max_shifts": 10, "min_shifts": None, "weight": 1, "active": 1},
+			]
+		)
+	)
+	assign_id = create_schedule_request(1, "2026-09-10", "2026-09-12", "assign", "hard", "Assigned")
+	snapshot = get_hard_schedule_requests_for_conflict_check()
+
+	assert not find_hard_schedule_request_conflicts(snapshot, 1, "2026-09-10", "2026-09-12", "prefer_off", "soft")
+	assert not find_hard_schedule_request_conflicts(snapshot, 1, "2026-09-10", "2026-09-12", "prefer_work", "hard")
+	assert not find_hard_schedule_request_conflicts(snapshot, 2, "2026-09-10", "2026-09-12", "vacation", "hard")
+	assert not find_hard_schedule_request_conflicts(
+		snapshot,
+		1,
+		"2026-09-10",
+		"2026-09-12",
+		"vacation",
+		"hard",
+		exclude_request_id=assign_id,
+	)
+
+
 def test_recurring_schema_initialization_is_non_destructive(isolated_db):
 	save_residents(
 		pd.DataFrame(
@@ -173,6 +234,28 @@ def test_recurring_preference_validates_type_weekday_dates_and_active_resident(i
 		create_recurring_preference(1, "prefer_off", 7, "2026-09-01")
 	with pytest.raises(ValueError, match="End date"):
 		create_recurring_preference(1, "prefer_off", 0, "2026-09-10", "2026-09-01")
+
+
+def test_historical_solver_warnings_display_resident_names(isolated_db):
+	save_residents(
+		pd.DataFrame(
+			[{"name": "Ada", "email": "", "max_shifts": 10, "min_shifts": None, "weight": 1, "active": 1}]
+		)
+	)
+	period_id = get_or_create_schedule_period(2026, 8, required_count=1)
+	with get_connection() as conn:
+		conn.execute(
+			"""
+			INSERT INTO schedule_runs (period_id, solver_status, warnings_json)
+			VALUES (?, 'INVALID_INPUT', ?)
+			""",
+			(period_id, '["Hard request conflict: resident_id 1 must work but is unavailable."]'),
+		)
+
+	runs = get_schedule_runs(period_id, limit=1)
+
+	assert "Hard request conflict: Ada must work" in runs.iloc[0]["warnings_json"]
+	assert "resident_id" not in runs.iloc[0]["warnings_json"]
 
 
 def test_schedule_requests_are_not_period_owned(isolated_db):
@@ -702,6 +785,39 @@ def test_swap_assignment_residents_rejects_hard_unavailable_target(isolated_db):
 
 	with pytest.raises(ValueError, match="hard unavailable"):
 		swap_assignment_residents(int(assignments.iloc[0].id), int(assignments.iloc[1].id))
+
+
+def test_delete_schedule_assignments_only_wipes_selected_month_assignments(isolated_db):
+	save_residents(
+		pd.DataFrame(
+			[
+				{"name": "Ada", "email": "ada@example.com", "max_shifts": 20, "min_shifts": None, "weight": 1, "active": 1},
+				{"name": "Ben", "email": "ben@example.com", "max_shifts": 20, "min_shifts": None, "weight": 1, "active": 1},
+			]
+		)
+	)
+	august_id = get_or_create_schedule_period(2026, 8, required_count=1)
+	september_id = get_or_create_schedule_period(2026, 9, required_count=1)
+	create_schedule_request(1, "2026-08-10", "2026-08-10", "assign", "hard", "Keep request")
+	create_schedule_rule(august_id, 1, "weekday_count", weekday=4, target_count=1, priority="hard", reason="Keep rule")
+	record_solver_run(august_id, "FEASIBLE", 123.0, ["Keep run"])
+	save_assignments(
+		august_id,
+		[
+			{"work_date": "2026-08-01", "resident_id": 1},
+			{"work_date": "2026-08-02", "resident_id": 2},
+		],
+	)
+	save_assignments(september_id, [{"work_date": "2026-09-01", "resident_id": 1}])
+
+	deleted_count = delete_schedule_assignments(august_id)
+
+	assert deleted_count == 2
+	assert get_assignments(august_id).empty
+	assert len(get_assignments(september_id)) == 1
+	assert len(get_schedule_requests_for_editor(august_id)) == 1
+	assert len(get_schedule_rules(august_id)) == 1
+	assert len(get_schedule_runs(august_id)) == 1
 
 
 def test_assignment_calendar_returns_month_grid(isolated_db):

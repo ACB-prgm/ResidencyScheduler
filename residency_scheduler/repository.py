@@ -13,6 +13,8 @@ from residency_scheduler.db import get_connection, seed_calendar_months
 
 
 HARD_UNAVAILABLE_TYPES = {"vacation", "unavailable", "approved_absence", "medical_leave"}
+HARD_WORK_REQUEST_TYPES = {"assign", "prefer_work"}
+HARD_OFF_REQUEST_TYPES = HARD_UNAVAILABLE_TYPES | {"prefer_off"}
 REQUEST_TYPES = HARD_UNAVAILABLE_TYPES | {"prefer_off", "prefer_work", "assign"}
 HARD_DEFAULT_REQUEST_TYPES = HARD_UNAVAILABLE_TYPES | {"assign"}
 SOFT_DEFAULT_REQUEST_TYPES = {"prefer_off", "prefer_work"}
@@ -481,6 +483,83 @@ def get_schedule_requests_for_editor(period_id: int) -> pd.DataFrame:
 	requests["start_date"] = pd.to_datetime(requests["start_date"]).dt.date
 	requests["end_date"] = pd.to_datetime(requests["end_date"]).dt.date
 	return requests[columns]
+
+
+def get_hard_schedule_requests_for_conflict_check() -> pd.DataFrame:
+	"""Return the global hard-request snapshot used by live form validation."""
+	columns = ["id", "resident_id", "resident_name", "start_date", "end_date", "request_type", "priority"]
+	requests = read_sql(
+		"""
+		SELECT sr.id, sr.resident_id, r.name AS resident_name,
+			sr.start_date, sr.end_date, sr.request_type, sr.priority
+		FROM schedule_requests sr
+		JOIN residents r ON r.id = sr.resident_id
+		WHERE LOWER(sr.priority) = 'hard'
+		ORDER BY sr.start_date, sr.end_date, r.name, sr.request_type, sr.id
+		"""
+	)
+	if requests.empty:
+		return pd.DataFrame(columns=columns)
+	requests["start_date"] = pd.to_datetime(requests["start_date"]).dt.date
+	requests["end_date"] = pd.to_datetime(requests["end_date"]).dt.date
+	return requests[columns]
+
+
+def find_hard_schedule_request_conflicts(
+	existing_requests: pd.DataFrame,
+	resident_id: int,
+	start_date: date | str,
+	end_date: date | str,
+	request_type: str,
+	priority: str,
+	exclude_request_id: int | None = None,
+) -> list[dict]:
+	"""Find opposite hard work/off requests whose inclusive date ranges overlap."""
+	start = _coerce_date(start_date, "Start date")
+	end = _coerce_date(end_date, "End date")
+	if end < start:
+		return []
+	candidate_type = str(request_type or "").strip().lower()
+	if str(priority or "").strip().lower() != "hard":
+		return []
+	if candidate_type in HARD_WORK_REQUEST_TYPES:
+		opposite_types = HARD_OFF_REQUEST_TYPES
+	elif candidate_type in HARD_OFF_REQUEST_TYPES:
+		opposite_types = HARD_WORK_REQUEST_TYPES
+	else:
+		return []
+
+	conflicts: list[dict] = []
+	for row in existing_requests.itertuples(index=False):
+		row_id = int(row.id)
+		if exclude_request_id is not None and row_id == int(exclude_request_id):
+			continue
+		if int(row.resident_id) != int(resident_id):
+			continue
+		if str(row.priority).strip().lower() != "hard":
+			continue
+		existing_type = str(row.request_type).strip().lower()
+		if existing_type not in opposite_types:
+			continue
+		existing_start = _coerce_date(row.start_date, "Start date")
+		existing_end = _coerce_date(row.end_date, "End date")
+		overlap_start = max(start, existing_start)
+		overlap_end = min(end, existing_end)
+		if overlap_start > overlap_end:
+			continue
+		conflicts.append(
+			{
+				"id": row_id,
+				"resident_id": int(row.resident_id),
+				"resident_name": str(row.resident_name),
+				"request_type": existing_type,
+				"start_date": existing_start,
+				"end_date": existing_end,
+				"overlap_start": overlap_start,
+				"overlap_end": overlap_end,
+			}
+		)
+	return sorted(conflicts, key=lambda item: (item["overlap_start"], item["request_type"], item["id"]))
 
 
 def replace_schedule_requests(period_id: int, df: pd.DataFrame) -> None:
@@ -1111,11 +1190,11 @@ def _validate_schedule_request_conflicts(expanded_rows: list[dict]) -> None:
 	requests = pd.DataFrame(expanded_rows)
 	hard_assignments = requests[
 		(requests["priority"].str.lower() == "hard")
-		& (requests["request_type"].str.lower().isin({"assign", "prefer_work"}))
+		& (requests["request_type"].str.lower().isin(HARD_WORK_REQUEST_TYPES))
 	]
 	hard_unavailable = requests[
 		(requests["priority"].str.lower() == "hard")
-		& (requests["request_type"].str.lower().isin(HARD_UNAVAILABLE_TYPES | {"prefer_off"}))
+		& (requests["request_type"].str.lower().isin(HARD_OFF_REQUEST_TYPES))
 	]
 	if hard_assignments.empty or hard_unavailable.empty:
 		return
@@ -1159,6 +1238,13 @@ def save_assignments(period_id: int, assignments: Iterable[dict]) -> None:
 			""",
 			rows,
 		)
+
+
+def delete_schedule_assignments(period_id: int) -> int:
+	"""Delete only the local assignments for one schedule month."""
+	with get_connection() as conn:
+		cursor = conn.execute("DELETE FROM assignments WHERE period_id = ?", (int(period_id),))
+		return int(cursor.rowcount)
 
 
 def update_assignment_resident(
@@ -1301,7 +1387,7 @@ def get_schedule_runs(period_id: int, limit: int | None = None) -> pd.DataFrame:
 	if limit is not None:
 		limit_clause = "LIMIT ?"
 		params.append(int(limit))
-	return read_sql(
+	runs = read_sql(
 		f"""
 		SELECT id, period_id, run_at, solver_status, objective_score, warnings_json
 		FROM schedule_runs
@@ -1311,6 +1397,33 @@ def get_schedule_runs(period_id: int, limit: int | None = None) -> pd.DataFrame:
 		""",
 		tuple(params),
 	)
+	if runs.empty:
+		return runs
+
+	resident_names = {
+		int(row.id): str(row.name)
+		for row in get_residents(active_only=False).itertuples()
+	}
+
+	def display_warnings(value: str | None) -> str:
+		try:
+			warnings = json.loads(str(value or "[]"))
+		except (TypeError, ValueError, json.JSONDecodeError):
+			return str(value or "")
+		if not isinstance(warnings, list):
+			return str(value or "")
+		normalized = [
+			re.sub(
+				r"\bresident_id\s+(\d+)\b",
+				lambda match: resident_names.get(int(match.group(1)), "Unknown resident"),
+				str(warning),
+			)
+			for warning in warnings
+		]
+		return json.dumps(normalized)
+
+	runs["warnings_json"] = runs["warnings_json"].map(display_warnings)
+	return runs
 
 
 def record_solver_run(period_id: int, solver_status: str, objective_score: float | None, warnings: list[str]) -> None:
