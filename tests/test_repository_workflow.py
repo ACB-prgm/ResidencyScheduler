@@ -865,12 +865,15 @@ def test_prior_assignment_history_skips_missing_months_with_single_month_periods
 
 	assert set(history["period_id"].astype(int)) == {june_id, august_id}
 	assert july_id not in set(history["period_id"].astype(int))
-	assert history.loc[history["work_date"] == "2026-06-05", "is_weekend"].iloc[0] == 1
-	assert history.loc[history["work_date"] == "2026-06-06", "is_weekend"].iloc[0] == 1
-	assert history.loc[history["work_date"] == "2026-06-08", "is_weekend"].iloc[0] == 0
+	assert history.loc[history["work_date"] == "2026-06-05", "shift_category"].iloc[0] == "friday"
+	assert history.loc[history["work_date"] == "2026-06-05", "shift_point_units"].iloc[0] == 3
+	assert history.loc[history["work_date"] == "2026-06-06", "shift_category"].iloc[0] == "saturday"
+	assert history.loc[history["work_date"] == "2026-06-06", "shift_points"].iloc[0] == 2.0
+	assert history.loc[history["work_date"] == "2026-06-08", "shift_category"].iloc[0] == "weekday"
+	assert history.loc[history["work_date"] == "2026-08-02", "shift_category"].iloc[0] == "sunday"
 
 
-def test_workload_summary_counts_friday_as_weekend(isolated_db):
+def test_workload_summary_counts_shift_categories_and_points(isolated_db):
 	save_residents(
 		pd.DataFrame(
 			[
@@ -890,9 +893,16 @@ def test_workload_summary_counts_friday_as_weekend(isolated_db):
 	)
 
 	summary = get_workload_summary(period_id)
+	ada = summary.loc[summary["resident_name"] == "Ada"].iloc[0]
+	ben = summary.loc[summary["resident_name"] == "Ben"].iloc[0]
 
-	assert int(summary.loc[summary["resident_name"] == "Ada", "weekend_shifts"].iloc[0]) == 1
-	assert int(summary.loc[summary["resident_name"] == "Ben", "weekend_shifts"].iloc[0]) == 1
+	assert int(ada["weekday_shifts"]) == 1
+	assert int(ada["friday_shifts"]) == 1
+	assert int(ada["saturday_shifts"]) == 0
+	assert int(ada["sunday_shifts"]) == 0
+	assert float(ada["workload_points"]) == 2.5
+	assert int(ben["saturday_shifts"]) == 1
+	assert float(ben["workload_points"]) == 2.0
 
 
 def test_workload_summary_scope_supports_l3m_and_ytd(isolated_db):
@@ -922,5 +932,8 @@ def test_workload_summary_scope_supports_l3m_and_ytd(isolated_db):
 	assert int(month["total_shifts"].sum()) == 1
 	assert int(l3m["total_shifts"].sum()) == 3
 	assert int(ytd["total_shifts"].sum()) == 5
+	assert float(month["workload_points"].sum()) == 1.5
+	assert float(l3m["workload_points"].sum()) == 4.0
+	assert float(ytd["workload_points"].sum()) == 7.0
 	assert int(l3m.loc[l3m["resident_name"] == "Ada", "total_shifts"].iloc[0]) == 1
 	assert int(l3m.loc[l3m["resident_name"] == "Ben", "total_shifts"].iloc[0]) == 2

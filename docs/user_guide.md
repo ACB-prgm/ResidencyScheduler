@@ -11,7 +11,7 @@ Each year-month has one schedule. Scheduling rules, generated assignments, manua
 Residents are the people eligible for call scheduling.
 
 - `PGY level` is stored from 1 through 5.
-- Higher PGY levels are protected from surplus total shifts and surplus weekend shifts when possible.
+- Higher PGY levels are protected from surplus total shifts and surplus workload points when possible.
 - Colors are used in the schedule calendar and must be unique.
 - Inactive residents are not used by the solver.
 
@@ -63,9 +63,9 @@ Example: if a resident is away but must cover one Friday+Saturday pair, add both
 
 That resident will only work the required Friday+Saturday pair, and the rest of the month will be spread across the other eligible residents.
 
-## Weekend Fairness
+## Workload Fairness
 
-Weekend shifts are Friday, Saturday, and Sunday. The solver balances these weekend shifts across residents when possible and also looks at the prior three months to avoid repeatedly giving the same resident surplus weekend burden.
+The solver balances raw total shifts first. It then uses configurable workload points to distribute higher-value call days: Monday through Thursday are 1 point, Friday and Sunday are 1.5 points, and Saturday is 2 points. The prior three months are included so the same resident is less likely to receive surplus total shifts or surplus workload points repeatedly.
 
 ## Generate Schedule
 
@@ -76,8 +76,9 @@ The page shows:
 - Solver controls and recent run status
 - A read-only, color-coded calendar using the call shift's start date
 - Workload summary
-  - Month shows only the selected month, L3M shows the selected month plus the prior two months, and YTD shows January through the selected month. Only saved assignments contribute.
-  - Weekend shifts are Friday, Saturday, and Sunday.
+	- Month shows only the selected month, L3M shows the selected month plus the prior two months, and YTD shows January through the selected month. Only saved assignments contribute.
+	- Weekday means Monday through Thursday. Friday, Saturday, and Sunday are displayed separately.
+	- Workload Points use Monday-Thursday = 1, Friday = 1.5, Saturday = 2, and Sunday = 1.5.
 - Soft prefer-off violations
 - Manual reassign and swap tools for unlocked assignments
 - ICS export

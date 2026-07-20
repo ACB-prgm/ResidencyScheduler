@@ -10,6 +10,11 @@ import pandas as pd
 
 from residency_scheduler.colors import RESIDENT_COLOR_PALETTE
 from residency_scheduler.db import get_connection, seed_calendar_months
+from residency_scheduler.shift_categories import (
+	SHIFT_CATEGORY_BY_WEEKDAY,
+	SHIFT_POINTS_BY_CATEGORY,
+	SHIFT_POINT_UNITS_BY_CATEGORY,
+)
 
 
 HARD_UNAVAILABLE_TYPES = {"vacation", "unavailable", "approved_absence", "medical_leave"}
@@ -21,7 +26,6 @@ SOFT_DEFAULT_REQUEST_TYPES = {"prefer_off", "prefer_work"}
 RECURRING_PREFERENCE_TYPES = {"prefer_off", "prefer_work"}
 PRIORITIES = {"hard", "soft"}
 SCHEDULE_RULE_TYPES = {"weekday_count", "weekday_pair_count", "away_rotation"}
-WEEKEND_WEEKDAYS = {4, 5, 6}
 WEEKDAYS = {
 	"Monday": 0,
 	"Tuesday": 1,
@@ -32,10 +36,6 @@ WEEKDAYS = {
 	"Sunday": 6,
 }
 WEEKDAY_NAMES = {value: key for key, value in WEEKDAYS.items()}
-
-
-def is_weekend_weekday(weekday: int) -> bool:
-	return int(weekday) in WEEKEND_WEEKDAYS
 
 
 def read_sql(query: str, params: tuple = ()) -> pd.DataFrame:
@@ -1007,7 +1007,16 @@ def get_assignments(period_id: int) -> pd.DataFrame:
 
 def get_prior_assignment_history(period_id: int, months: int = 3) -> pd.DataFrame:
 	period = get_period(period_id)
-	columns = ["period_id", "year", "month", "resident_id", "work_date", "is_weekend"]
+	columns = [
+		"period_id",
+		"year",
+		"month",
+		"resident_id",
+		"work_date",
+		"shift_category",
+		"shift_point_units",
+		"shift_points",
+	]
 	if months < 1:
 		return pd.DataFrame(columns=columns)
 
@@ -1049,7 +1058,10 @@ def get_prior_assignment_history(period_id: int, months: int = 3) -> pd.DataFram
 		tuple(selected_period_ids),
 	)
 	if not history.empty:
-		history["is_weekend"] = pd.to_datetime(history["work_date"]).dt.weekday.isin(WEEKEND_WEEKDAYS).astype(int)
+		weekdays = pd.to_datetime(history["work_date"]).dt.weekday
+		history["shift_category"] = weekdays.map(SHIFT_CATEGORY_BY_WEEKDAY)
+		history["shift_point_units"] = history["shift_category"].map(SHIFT_POINT_UNITS_BY_CATEGORY).astype(int)
+		history["shift_points"] = history["shift_category"].map(SHIFT_POINTS_BY_CATEGORY).astype(float)
 	return history[columns]
 
 
@@ -1480,20 +1492,43 @@ def get_workload_summary_for_scope(period_id: int, scope: str) -> pd.DataFrame:
 
 def _summarize_workload_assignments(assignments: pd.DataFrame) -> pd.DataFrame:
 	if assignments.empty:
-		return pd.DataFrame(columns=["resident_name", "total_shifts", "weekend_shifts", "hard_assigned_shifts", "manual_shifts"])
+		return pd.DataFrame(
+			columns=[
+				"resident_name",
+				"total_shifts",
+				"weekday_shifts",
+				"friday_shifts",
+				"saturday_shifts",
+				"sunday_shifts",
+				"workload_points",
+				"hard_assigned_shifts",
+				"manual_shifts",
+			]
+		)
 
 	work_dates = pd.to_datetime(assignments["work_date"])
-	assignments = assignments.assign(is_weekend=work_dates.dt.weekday.isin(WEEKEND_WEEKDAYS))
+	shift_categories = work_dates.dt.weekday.map(SHIFT_CATEGORY_BY_WEEKDAY)
+	assignments = assignments.assign(
+		is_weekday=shift_categories.eq("weekday"),
+		is_friday=shift_categories.eq("friday"),
+		is_saturday=shift_categories.eq("saturday"),
+		is_sunday=shift_categories.eq("sunday"),
+		workload_points=shift_categories.map(SHIFT_POINTS_BY_CATEGORY).astype(float),
+	)
 	return (
 		assignments.groupby("resident_name")
 		.agg(
 			total_shifts=("id", "count"),
-			weekend_shifts=("is_weekend", "sum"),
+			weekday_shifts=("is_weekday", "sum"),
+			friday_shifts=("is_friday", "sum"),
+			saturday_shifts=("is_saturday", "sum"),
+			sunday_shifts=("is_sunday", "sum"),
+			workload_points=("workload_points", "sum"),
 			hard_assigned_shifts=("is_locked", "sum"),
 			manual_shifts=("source", lambda values: int((values == "manual").sum())),
 		)
 		.reset_index()
-		.sort_values(["total_shifts", "weekend_shifts", "resident_name"], ascending=[False, False, True])
+		.sort_values(["workload_points", "total_shifts", "resident_name"], ascending=[False, False, True])
 	)
 
 

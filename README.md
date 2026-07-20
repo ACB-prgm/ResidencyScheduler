@@ -21,7 +21,7 @@ The app uses:
 - Prefer off and prefer work requests default to soft priority
 - Vacation ranges automatically add a soft prefer-work request for the Thursday before vacation starts when that date is in the same month
 - Generic scheduling rules support weekday counts and adjacent weekday pairs such as Friday+Saturday for a resident
-- Workload, weekend shifts, preferences, back-to-back shifts, and rolling surplus fairness are optimized where possible
+- Raw workload, weighted day values, preferences, back-to-back shifts, and rolling surplus fairness are optimized where possible
 
 ## Local Setup
 
@@ -127,7 +127,7 @@ https://www.googleapis.com/auth/calendar.events
 3. Enter availability, preferences, vacation ranges, and hard assignments using resident-name dropdowns.
 4. Enter special weekday-count, adjacent-pair, and away-rotation rules.
 5. Generate schedule with OR-Tools.
-6. Review the FullCalendar view, assignments, workload, weekend distribution, and prefer-off violations.
+6. Review the FullCalendar view, assignments, workload points, day-category distribution, and prefer-off violations.
 7. Manually reassign unlocked generated shifts with hard-constraint validation.
 8. Download a single call-schedule ICS file or publish directly to Google Calendar.
 
@@ -145,9 +145,9 @@ Hard constraints:
 Soft objective weights:
 
 - Total workload is distributed by floor/ceiling fairness first.
-- Friday/Saturday/Sunday weekend workload is distributed by floor/ceiling fairness first.
-- Previous 3 calendar months discourage repeating surplus total or weekend shifts for the same resident.
-- Higher PGY levels are protected from surplus total and weekend shifts where feasible.
+- Weighted workload points then distribute higher-value days: Monday-Thursday = 1, Friday = 1.5, Saturday = 2, and Sunday = 1.5.
+- Previous 3 calendar months discourage repeating surplus total shifts or weighted workload points for the same resident.
+- Higher PGY levels are protected from surplus total shifts and weighted workload points where feasible.
 - Equal-cost leftover assignments use fresh random tie-breaking on each generate run.
 - Prefer-off violation: 100
 - Prefer-work miss: 10

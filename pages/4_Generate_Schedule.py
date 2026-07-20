@@ -131,8 +131,9 @@ render_user_guide(
 
 	### Review and edit
 	- **Calendar** shows one color-coded, all-day display entry on each call shift's start date. It is read-only; use Edit Assignment for changes.
-	- **Workload summary** shows total shifts, Friday/Saturday/Sunday weekend shifts, hard assigned shifts, and manual shifts by resident.
+	- **Workload summary** shows total shifts, Monday-Thursday weekday shifts, Friday shifts, Saturday shifts, Sunday shifts, workload points, hard assigned shifts, and manual shifts by resident.
 	  - **Month** uses the selected month, **L3M** uses the selected month plus the prior two months, and **YTD** uses January through the selected month. Only months with saved assignments contribute.
+	  - Workload points are configurable: Monday-Thursday = 1 point, Friday = 1.5 points, Saturday = 2 points, and Sunday = 1.5 points. Raw total shifts are balanced first, then points help distribute higher-value days.
 	- **Preference violations** lists soft prefer-off requests that received an assignment. Hard requests cannot appear as violations because they are mandatory.
 	- **Edit Assignment** can reassign one unlocked assignment or swap two unlocked assignments. Selecting "Create hard assign request" also saves dated hard assign requests that remain in effect on future solver runs and survive a local schedule wipe.
 
@@ -185,41 +186,58 @@ with st.expander("Wipe current schedule"):
 			st.rerun()
 
 if not assignments.empty:
-	calendar_col, workload_col = st.columns([2, 1], gap="large")
-	with calendar_col:
-		st.markdown("### Calendar")
-		calendar(
-			events=build_fullcalendar_events(assignments),
-			options={
-				"initialView": "dayGridMonth",
-				"initialDate": f"{int(period['year'])}-{int(period['month']):02d}-01",
-				"height": "auto",
-				"editable": False,
-				"selectable": False,
-				"headerToolbar": {
-					"left": "prev,next today",
-					"center": "title",
-					"right": "dayGridMonth,listMonth",
-				},
+	st.markdown("### Calendar")
+	calendar(
+		events=build_fullcalendar_events(assignments),
+		options={
+			"initialView": "dayGridMonth",
+			"initialDate": f"{int(period['year'])}-{int(period['month']):02d}-01",
+			"height": "auto",
+			"editable": False,
+			"selectable": False,
+			"headerToolbar": {
+				"left": "prev,next today",
+				"center": "title",
+				"right": "dayGridMonth,listMonth",
 			},
-			key=f"assignment_calendar_{period_id}",
-		)
+		},
+		key=f"assignment_calendar_{period_id}",
+	)
 
-	with workload_col:
-		st.markdown("### Workload summary")
-		workload_range = st.radio(
-			"Workload range",
-			["Month", "L3M", "YTD"],
-			horizontal=True,
-			label_visibility="collapsed",
-			key=f"workload_range_{period_id}",
-		)
-		summary = get_cached_workload_summary_for_scope(period_id, workload_range)
-		st.caption(f"Showing workload: {workload_range}")
-		metric_cols = st.columns(2)
-		metric_cols[0].metric("Total shifts", int(summary["total_shifts"].sum()) if not summary.empty else 0)
-		metric_cols[1].metric("Violations", len(month_context["preference_violations"]))
-		st.dataframe(summary, width="stretch", hide_index=True, key=f"workload_summary_{period_id}_{workload_range.lower()}")
+	st.markdown("### Workload summary")
+	workload_range = st.radio(
+		"Workload range",
+		["Month", "L3M", "YTD"],
+		horizontal=True,
+		label_visibility="collapsed",
+		key=f"workload_range_{period_id}",
+	)
+	summary = get_cached_workload_summary_for_scope(period_id, workload_range)
+	st.caption(f"Showing workload: {workload_range}")
+	metric_cols = st.columns(3)
+	metric_cols[0].metric("Total shifts", int(summary["total_shifts"].sum()) if not summary.empty else 0)
+	metric_cols[1].metric("Workload points", f"{summary['workload_points'].sum():.1f}" if not summary.empty else "0.0")
+	metric_cols[2].metric("Violations", len(month_context["preference_violations"]))
+	display_summary = summary.rename(
+		columns={
+			"resident_name": "Resident",
+			"total_shifts": "Total Shifts",
+			"weekday_shifts": "Weekday Shifts",
+			"friday_shifts": "Friday Shifts",
+			"saturday_shifts": "Saturday Shifts",
+			"sunday_shifts": "Sunday Shifts",
+			"workload_points": "Workload Points",
+			"hard_assigned_shifts": "Hard Assigned Shifts",
+			"manual_shifts": "Manual Shifts",
+		}
+	)
+	st.dataframe(
+		display_summary,
+		width="stretch",
+		hide_index=True,
+		column_config={"Workload Points": st.column_config.NumberColumn(format="%.1f")},
+		key=f"workload_summary_{period_id}_{workload_range.lower()}",
+	)
 
 	st.markdown("### Preference violations")
 	violations = month_context["preference_violations"]
