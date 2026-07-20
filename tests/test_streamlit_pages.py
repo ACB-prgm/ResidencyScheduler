@@ -194,8 +194,35 @@ def test_generate_schedule_guide_explains_replacement_wipe_and_publish_boundarie
 	assert "Running it again replaces all current local assignments" in guide_text
 	assert "Wipe current schedule" in guide_text
 	assert "does not remove published Google Calendar events" in guide_text
-	assert "Friday/Saturday/Sunday weekend shifts" in guide_text
+	assert "Monday-Thursday = 1 point" in guide_text
+	assert "Friday = 1.5 points" in guide_text
+	assert "Saturday = 2 points" in guide_text
+	assert "Sunday = 1.5 points" in guide_text
 	assert "ICS export" in guide_text
+
+
+def test_generate_schedule_places_weighted_workload_summary_below_calendar(isolated_db):
+	period_id = get_or_create_schedule_period(date.today().year, date.today().month, required_count=1)
+	save_assignments(period_id, [{"work_date": date.today().replace(day=1).isoformat(), "resident_id": 1}])
+	app = AppTest.from_file(str(ROOT / "pages/4_Generate_Schedule.py"))
+	app.session_state[AUTH_SESSION_KEY] = authenticated_session()
+	app.run(timeout=5)
+
+	assert not app.exception
+	markdown_values = [item.value for item in app.markdown]
+	assert markdown_values.index("### Calendar") < markdown_values.index("### Workload summary")
+	workload_table = next(item.value for item in app.dataframe if "Workload Points" in item.value.columns)
+	assert list(workload_table.columns) == [
+		"Resident",
+		"Total Shifts",
+		"Weekday Shifts",
+		"Friday Shifts",
+		"Saturday Shifts",
+		"Sunday Shifts",
+		"Workload Points",
+		"Hard Assigned Shifts",
+		"Manual Shifts",
+	]
 
 
 def test_residents_guide_mentions_email_access_control(isolated_db):

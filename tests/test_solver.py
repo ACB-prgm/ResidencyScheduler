@@ -19,6 +19,7 @@ from residency_scheduler.repository import (
 	save_residents,
 )
 from residency_scheduler.solver import solve_period
+from residency_scheduler.shift_categories import shift_point_units_for_weekday
 
 
 @pytest.fixture
@@ -436,25 +437,24 @@ def test_total_shift_surplus_goes_to_lower_weight_residents(isolated_db):
 	assert sum(counts[name] == 5 for name in low_weight) == 3
 
 
-def test_weekend_surplus_goes_to_lower_weight_residents(isolated_db):
+def test_weighted_surplus_goes_to_lower_weight_residents(isolated_db):
 	low_weight = ["Low 1", "Low 2", "Low 3", "Low 4"]
 	high_weight = ["High 1", "High 2", "High 3"]
 	names = low_weight + high_weight
 	add_residents(names, max_shifts=10, weights={name: 1 for name in low_weight} | {name: 5 for name in high_weight})
-	period_id = get_or_create_schedule_period(2026, 5, required_count=1)
+	period_id = get_or_create_schedule_period(2026, 2, required_count=1)
 
-	result = solve_period(period_id, max_time_seconds=10)
+	result = solve_period(period_id, max_time_seconds=10, random_seed=1)
 
 	assert result.status in {"OPTIMAL", "FEASIBLE"}
 	assignments = get_assignments(period_id)
-	weekend_assignments = assignments[pd.to_datetime(assignments["work_date"]).dt.weekday >= 4]
-	weekend_counts = weekend_assignments.groupby("resident_name").size().to_dict()
-	for name in names:
-		weekend_counts.setdefault(name, 0)
+	assignments["point_units"] = pd.to_datetime(assignments["work_date"]).dt.weekday.map(shift_point_units_for_weekday)
+	shift_counts = assignments.groupby("resident_name").size().to_dict()
+	point_units = assignments.groupby("resident_name")["point_units"].sum().to_dict()
 
-	assert sorted(weekend_counts.values()) == [2, 2, 2, 2, 2, 2, 3]
-	assert all(weekend_counts[name] == 2 for name in high_weight)
-	assert sum(weekend_counts[name] == 3 for name in low_weight) == 1
+	assert set(shift_counts.values()) == {4}
+	assert all(point_units[name] <= 10 for name in high_weight)
+	assert any(point_units[name] > 10 for name in low_weight)
 
 
 def test_seeded_random_tie_break_can_rotate_equal_cost_leftover_shift(isolated_db):
@@ -485,7 +485,7 @@ def test_prior_total_surplus_discourages_same_current_surplus_resident(isolated_
 	assert sorted(counts.values()) == [6, 6, 6, 6, 7]
 
 
-def test_prior_weekend_surplus_discourages_same_current_weekend_surplus_resident(isolated_db):
+def test_prior_weighted_surplus_discourages_same_current_weighted_surplus_resident(isolated_db):
 	add_residents(["Ada", "Ben", "Cam"], max_shifts=14)
 	prior_id = get_or_create_schedule_period(2026, 7, required_count=1)
 	current_id = get_or_create_schedule_period(2026, 8, required_count=1)
@@ -493,36 +493,11 @@ def test_prior_weekend_surplus_discourages_same_current_weekend_surplus_resident
 		prior_id,
 		[
 			{"work_date": "2026-07-04", "resident_id": 1},
-			{"work_date": "2026-07-05", "resident_id": 1},
 			{"work_date": "2026-07-11", "resident_id": 1},
-			{"work_date": "2026-07-12", "resident_id": 1},
-			{"work_date": "2026-07-18", "resident_id": 2},
-			{"work_date": "2026-07-19", "resident_id": 2},
-			{"work_date": "2026-07-25", "resident_id": 3},
-			{"work_date": "2026-07-26", "resident_id": 3},
 			{"work_date": "2026-07-01", "resident_id": 2},
 			{"work_date": "2026-07-02", "resident_id": 2},
-			{"work_date": "2026-07-03", "resident_id": 2},
-			{"work_date": "2026-07-06", "resident_id": 2},
-			{"work_date": "2026-07-07", "resident_id": 2},
-			{"work_date": "2026-07-08", "resident_id": 2},
-			{"work_date": "2026-07-09", "resident_id": 2},
-			{"work_date": "2026-07-10", "resident_id": 2},
-			{"work_date": "2026-07-13", "resident_id": 2},
 			{"work_date": "2026-07-14", "resident_id": 3},
 			{"work_date": "2026-07-15", "resident_id": 3},
-			{"work_date": "2026-07-16", "resident_id": 3},
-			{"work_date": "2026-07-17", "resident_id": 3},
-			{"work_date": "2026-07-20", "resident_id": 3},
-			{"work_date": "2026-07-21", "resident_id": 3},
-			{"work_date": "2026-07-22", "resident_id": 3},
-			{"work_date": "2026-07-23", "resident_id": 3},
-			{"work_date": "2026-07-24", "resident_id": 3},
-			{"work_date": "2026-07-27", "resident_id": 1},
-			{"work_date": "2026-07-28", "resident_id": 1},
-			{"work_date": "2026-07-29", "resident_id": 1},
-			{"work_date": "2026-07-30", "resident_id": 1},
-			{"work_date": "2026-07-31", "resident_id": 1},
 		],
 	)
 
@@ -530,10 +505,10 @@ def test_prior_weekend_surplus_discourages_same_current_weekend_surplus_resident
 
 	assert result.status in {"OPTIMAL", "FEASIBLE"}
 	assignments = get_assignments(current_id)
-	weekend_assignments = assignments[pd.to_datetime(assignments["work_date"]).dt.weekday >= 4]
-	weekend_counts = weekend_assignments.groupby("resident_id").size().to_dict()
-	assert weekend_counts[1] == 4
-	assert sorted(weekend_counts.values()) == [4, 5, 5]
+	assignments["point_units"] = pd.to_datetime(assignments["work_date"]).dt.weekday.map(shift_point_units_for_weekday)
+	point_units = assignments.groupby("resident_id")["point_units"].sum().to_dict()
+	assert point_units[1] <= point_units[2]
+	assert point_units[1] <= point_units[3]
 
 
 def test_exactly_two_fridays_weekday_count_rule_is_enforced(isolated_db):

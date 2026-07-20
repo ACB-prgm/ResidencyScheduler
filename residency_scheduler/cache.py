@@ -14,7 +14,7 @@ from residency_scheduler.db import get_cache_db_path, get_database_url, init_db,
 from residency_scheduler import repository
 
 T = TypeVar("T")
-CACHE_KEY_VERSION = "v5"
+CACHE_KEY_VERSION = "v6"
 SCHEMA_INIT_VERSION = "recurring-preferences-v1"
 
 
