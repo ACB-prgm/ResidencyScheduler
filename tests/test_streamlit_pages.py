@@ -198,6 +198,8 @@ def test_generate_schedule_guide_explains_replacement_wipe_and_publish_boundarie
 	assert "Friday = 1.5 points" in guide_text
 	assert "Saturday = 2 points" in guide_text
 	assert "Sunday = 1.5 points" in guide_text
+	assert "independently balances" in guide_text
+	assert "does not optimize the aggregate point total" in guide_text
 	assert "ICS export" in guide_text
 
 
@@ -223,6 +225,63 @@ def test_generate_schedule_places_weighted_workload_summary_below_calendar(isola
 		"Hard Assigned Shifts",
 		"Manual Shifts",
 	]
+
+
+def test_edit_assignment_defaults_to_swap_and_warns_about_preference_impact(isolated_db):
+	period_id = get_or_create_schedule_period(date.today().year, date.today().month, required_count=1)
+	first_date = date.today().replace(day=1)
+	second_date = date.today().replace(day=2)
+	save_assignments(
+		period_id,
+		[
+			{"work_date": first_date.isoformat(), "resident_id": 1},
+			{"work_date": second_date.isoformat(), "resident_id": 2},
+		],
+	)
+	create_schedule_request(
+		2,
+		first_date,
+		first_date,
+		"prefer_off",
+		"soft",
+		"Ben wants this date off",
+	)
+	app = AppTest.from_file(str(ROOT / "pages/4_Generate_Schedule.py"))
+	auth_session = authenticated_session()
+	auth_session["scopes"] = ["openid", "email", "profile"]
+	app.session_state[AUTH_SESSION_KEY] = auth_session
+	app.run(timeout=5)
+
+	assert not app.exception
+	edit_mode = next(item for item in app.radio if item.label == "Edit mode")
+	assert edit_mode.value == "Swap"
+	assert any("Proposed preference impact" in item.value for item in app.warning)
+	save_swap = next(button for button in app.button if button.label == "Save swap")
+	assert not save_swap.disabled
+
+
+def test_edit_assignment_blocks_hard_preference_impact(isolated_db):
+	period_id = get_or_create_schedule_period(date.today().year, date.today().month, required_count=1)
+	first_date = date.today().replace(day=1)
+	second_date = date.today().replace(day=2)
+	save_assignments(
+		period_id,
+		[
+			{"work_date": first_date.isoformat(), "resident_id": 1},
+			{"work_date": second_date.isoformat(), "resident_id": 2},
+		],
+	)
+	create_schedule_request(2, first_date, first_date, "prefer_off", "hard", "Hard day off")
+	app = AppTest.from_file(str(ROOT / "pages/4_Generate_Schedule.py"))
+	auth_session = authenticated_session()
+	auth_session["scopes"] = ["openid", "email", "profile"]
+	app.session_state[AUTH_SESSION_KEY] = auth_session
+	app.run(timeout=5)
+
+	assert not app.exception
+	assert any("Resolve the hard conflict before saving" in item.value for item in app.error)
+	save_swap = next(button for button in app.button if button.label == "Save swap")
+	assert save_swap.disabled
 
 
 def test_residents_guide_mentions_email_access_control(isolated_db):

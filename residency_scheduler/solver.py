@@ -19,15 +19,19 @@ from residency_scheduler.repository import (
 	record_solver_run,
 	save_assignments,
 )
-from residency_scheduler.shift_categories import shift_point_units_for_weekday
+from residency_scheduler.shift_categories import (
+	SHIFT_WEIGHT_UNITS_BY_CATEGORY,
+	shift_category_for_weekday,
+)
 
-# Raw count balance remains the first fairness tier; weighted points refine schedules within it.
+# Raw count balance remains the first fairness tier. Categories are then balanced independently;
+# category weights control the relative cost of an imbalance, not an aggregate points target.
 TOTAL_FAIR_DISTRIBUTION_PENALTY = 5000
-WEIGHTED_FAIR_DISTRIBUTION_PENALTY = 500
+CATEGORY_FAIR_DISTRIBUTION_PENALTY = 500
 TOTAL_SURPLUS_WEIGHT_PENALTY = 50
-WEIGHTED_SURPLUS_WEIGHT_PENALTY = 15
+CATEGORY_SURPLUS_WEIGHT_PENALTY = 15
 ROLLING_TOTAL_SURPLUS_PENALTY = 800
-ROLLING_WEIGHTED_SURPLUS_PENALTY = 75
+ROLLING_CATEGORY_SURPLUS_PENALTY = 300
 RANDOM_TIE_BREAK_MAX = 100
 SOFT_AWAY_ROTATION_PENALTY = 100000
 
@@ -122,35 +126,35 @@ def solve_period(period_id: int, max_time_seconds: int = 120, random_seed: int |
 		surplus_weight_penalty=TOTAL_SURPLUS_WEIGHT_PENALTY,
 	)
 
-	point_units_by_date = {
-		d.isoformat(): shift_point_units_for_weekday(d.weekday())
-		for d in dates
-	}
-	weighted_shift_counts = {
-		resident_id: sum(
-			works[(resident_id, work_date)] * point_units
-			for work_date, point_units in point_units_by_date.items()
+	category_surplus: dict[str, dict[int, cp_model.IntVar]] = {}
+	for category, multiplier_units in SHIFT_WEIGHT_UNITS_BY_CATEGORY.items():
+		category_dates = [
+			d.isoformat()
+			for d in dates
+			if shift_category_for_weekday(d.weekday()) == category
+		]
+		category_shift_counts = {
+			resident_id: sum(works[(resident_id, work_date)] for work_date in category_dates)
+			for resident_id in resident_ids
+		}
+		category_surplus[category] = _add_distribution_objective(
+			model=model,
+			objective_terms=objective_terms,
+			residents=residents,
+			counts_by_resident=category_shift_counts,
+			total_required=len(category_dates) * required_count,
+			max_count=len(category_dates),
+			prefix=f"category_{category}",
+			fair_distribution_penalty=CATEGORY_FAIR_DISTRIBUTION_PENALTY * multiplier_units,
+			surplus_weight_penalty=CATEGORY_SURPLUS_WEIGHT_PENALTY * multiplier_units,
 		)
-		for resident_id in resident_ids
-	}
-	weighted_surplus = _add_distribution_objective(
-		model=model,
-		objective_terms=objective_terms,
-		residents=residents,
-		counts_by_resident=weighted_shift_counts,
-		total_required=sum(point_units_by_date.values()) * required_count,
-		max_count=sum(point_units_by_date.values()),
-		prefix="weighted",
-		fair_distribution_penalty=WEIGHTED_FAIR_DISTRIBUTION_PENALTY,
-		surplus_weight_penalty=WEIGHTED_SURPLUS_WEIGHT_PENALTY,
-	)
 
 	_add_rolling_surplus_objective(
 		objective_terms=objective_terms,
 		resident_ids=resident_ids,
 		prior_history=prior_history,
 		total_surplus=total_surplus,
-		weighted_surplus=weighted_surplus,
+		category_surplus=category_surplus,
 	)
 
 	for row in requests.itertuples():
@@ -340,32 +344,36 @@ def _add_rolling_surplus_objective(
 	resident_ids: list[int],
 	prior_history: pd.DataFrame,
 	total_surplus: dict[int, cp_model.IntVar],
-	weighted_surplus: dict[int, cp_model.IntVar],
+	category_surplus: dict[str, dict[int, cp_model.IntVar]],
 ) -> None:
 	if prior_history.empty:
 		return
 
 	prior_total_surplus = _historical_surplus_counts(prior_history, resident_ids)
-	prior_weighted_surplus = _historical_surplus_counts(
-		prior_history,
-		resident_ids,
-		value_column="shift_point_units",
-	)
+	prior_category_surplus = {
+		category: _historical_surplus_counts(prior_history, resident_ids, category=category)
+		for category in category_surplus
+	}
 
 	for resident_id in resident_ids:
 		total_penalty = prior_total_surplus.get(resident_id, 0) * ROLLING_TOTAL_SURPLUS_PENALTY
 		if total_penalty and resident_id in total_surplus:
 			objective_terms.append(total_surplus[resident_id] * total_penalty)
 
-		weighted_penalty = prior_weighted_surplus.get(resident_id, 0) * ROLLING_WEIGHTED_SURPLUS_PENALTY
-		if weighted_penalty and resident_id in weighted_surplus:
-			objective_terms.append(weighted_surplus[resident_id] * weighted_penalty)
+		for category, current_surplus in category_surplus.items():
+			category_penalty = (
+				prior_category_surplus[category].get(resident_id, 0)
+				* ROLLING_CATEGORY_SURPLUS_PENALTY
+				* SHIFT_WEIGHT_UNITS_BY_CATEGORY[category]
+			)
+			if category_penalty and resident_id in current_surplus:
+				objective_terms.append(current_surplus[resident_id] * category_penalty)
 
 
 def _historical_surplus_counts(
 	prior_history: pd.DataFrame,
 	resident_ids: list[int],
-	value_column: str | None = None,
+	category: str | None = None,
 ) -> dict[int, int]:
 	surplus_counts = {resident_id: 0 for resident_id in resident_ids}
 	resident_count = len(resident_ids)
@@ -373,19 +381,14 @@ def _historical_surplus_counts(
 		return surplus_counts
 
 	history = prior_history.copy()
+	if category is not None:
+		history = history[history["shift_category"] == category]
+	if history.empty:
+		return surplus_counts
+
 	for _, month_assignments in history.groupby(["year", "month", "period_id"]):
-		if value_column is None:
-			total_required = len(month_assignments)
-			counts = month_assignments["resident_id"].astype(int).value_counts().to_dict()
-		else:
-			total_required = int(month_assignments[value_column].astype(int).sum())
-			counts = (
-				month_assignments.assign(resident_id=month_assignments["resident_id"].astype(int))
-				.groupby("resident_id")[value_column]
-				.sum()
-				.astype(int)
-				.to_dict()
-			)
+		total_required = len(month_assignments)
+		counts = month_assignments["resident_id"].astype(int).value_counts().to_dict()
 		if total_required == 0:
 			continue
 		base = total_required // resident_count

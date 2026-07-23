@@ -12,8 +12,8 @@ from residency_scheduler.colors import RESIDENT_COLOR_PALETTE
 from residency_scheduler.db import get_connection, seed_calendar_months
 from residency_scheduler.shift_categories import (
 	SHIFT_CATEGORY_BY_WEEKDAY,
-	SHIFT_POINTS_BY_CATEGORY,
-	SHIFT_POINT_UNITS_BY_CATEGORY,
+	SHIFT_CATEGORY_WEIGHTS,
+	SHIFT_WEIGHT_UNITS_BY_CATEGORY,
 )
 
 
@@ -818,6 +818,46 @@ def get_expanded_schedule_requests(period_id: int) -> pd.DataFrame:
 	return normalized[columns].reset_index(drop=True)
 
 
+def evaluate_assignment_preference_impacts(
+	expanded_requests: pd.DataFrame,
+	changes: list[dict],
+) -> pd.DataFrame:
+	"""Return preferences a proposed manual assignment edit would violate."""
+	columns = ["resident_id", "resident_name", "work_date", "request_type", "priority", "reason", "action"]
+	if expanded_requests.empty or not changes:
+		return pd.DataFrame(columns=columns)
+
+	preferences = expanded_requests[
+		expanded_requests["request_type"].astype(str).str.lower().isin(RECURRING_PREFERENCE_TYPES)
+	].copy()
+	if preferences.empty:
+		return pd.DataFrame(columns=columns)
+
+	impacts: list[pd.DataFrame] = []
+	for change in changes:
+		action = str(change["action"]).strip().lower()
+		violated_type = "prefer_off" if action == "assign" else "prefer_work" if action == "remove" else None
+		if violated_type is None:
+			raise ValueError("Preference impact action must be assign or remove.")
+		matches = preferences[
+			(preferences["resident_id"].astype(int) == int(change["resident_id"]))
+			& (preferences["work_date"].astype(str) == str(change["work_date"]))
+			& (preferences["request_type"].astype(str).str.lower() == violated_type)
+		].copy()
+		if not matches.empty:
+			matches["action"] = action
+			impacts.append(matches[columns])
+
+	if not impacts:
+		return pd.DataFrame(columns=columns)
+	return (
+		pd.concat(impacts, ignore_index=True)
+		.drop_duplicates(["resident_id", "work_date", "request_type", "priority", "action"])
+		.sort_values(["work_date", "resident_name", "request_type"])
+		.reset_index(drop=True)
+	)
+
+
 def get_schedule_rules(period_id: int) -> pd.DataFrame:
 	return read_sql(
 		"""
@@ -1060,8 +1100,8 @@ def get_prior_assignment_history(period_id: int, months: int = 3) -> pd.DataFram
 	if not history.empty:
 		weekdays = pd.to_datetime(history["work_date"]).dt.weekday
 		history["shift_category"] = weekdays.map(SHIFT_CATEGORY_BY_WEEKDAY)
-		history["shift_point_units"] = history["shift_category"].map(SHIFT_POINT_UNITS_BY_CATEGORY).astype(int)
-		history["shift_points"] = history["shift_category"].map(SHIFT_POINTS_BY_CATEGORY).astype(float)
+		history["shift_point_units"] = history["shift_category"].map(SHIFT_WEIGHT_UNITS_BY_CATEGORY).astype(int)
+		history["shift_points"] = history["shift_category"].map(SHIFT_CATEGORY_WEIGHTS).astype(float)
 	return history[columns]
 
 
@@ -1513,7 +1553,7 @@ def _summarize_workload_assignments(assignments: pd.DataFrame) -> pd.DataFrame:
 		is_friday=shift_categories.eq("friday"),
 		is_saturday=shift_categories.eq("saturday"),
 		is_sunday=shift_categories.eq("sunday"),
-		workload_points=shift_categories.map(SHIFT_POINTS_BY_CATEGORY).astype(float),
+		workload_points=shift_categories.map(SHIFT_CATEGORY_WEIGHTS).astype(float),
 	)
 	return (
 		assignments.groupby("resident_name")

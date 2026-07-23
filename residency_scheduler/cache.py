@@ -122,6 +122,18 @@ def _get_cached_schedule_requests_for_editor(database_url: str, period_id: int) 
 	)
 
 
+def get_cached_expanded_schedule_requests(period_id: int) -> pd.DataFrame:
+	return _get_cached_expanded_schedule_requests(get_database_url(), period_id)
+
+
+@st.cache_data(show_spinner=False)
+def _get_cached_expanded_schedule_requests(database_url: str, period_id: int) -> pd.DataFrame:
+	return _read_through_local_cache(
+		f"month:{period_id}:expanded_requests",
+		lambda: repository.get_expanded_schedule_requests(period_id),
+	)
+
+
 def get_cached_hard_schedule_requests_for_conflict_check() -> pd.DataFrame:
 	return _get_cached_hard_schedule_requests_for_conflict_check(get_database_url())
 
@@ -243,6 +255,7 @@ def clear_reference_data_cache() -> None:
 def clear_schedule_request_cache() -> None:
 	"""Clear request-derived views without evicting unrelated month data."""
 	_get_cached_schedule_requests_for_editor.clear()
+	_get_cached_expanded_schedule_requests.clear()
 	_get_cached_recurring_preferences_for_editor.clear()
 	_get_cached_hard_schedule_requests_for_conflict_check.clear()
 	_get_cached_preference_violations.clear()
@@ -250,6 +263,7 @@ def clear_schedule_request_cache() -> None:
 	_clear_local_cache_patterns(
 		[
 			"%:requests_editor",
+			"%:expanded_requests",
 			"%:preference_violations",
 			"%:context",
 			"%:reference:recurring_preferences_editor",
@@ -262,6 +276,7 @@ def clear_month_data_cache() -> None:
 	_get_cached_or_create_schedule_period.clear()
 	_get_cached_period.clear()
 	_get_cached_schedule_requests_for_editor.clear()
+	_get_cached_expanded_schedule_requests.clear()
 	_get_cached_schedule_rules_for_editor.clear()
 	_get_cached_assignments.clear()
 	_get_cached_workload_summary.clear()

@@ -21,7 +21,7 @@ The app uses:
 - Prefer off and prefer work requests default to soft priority
 - Vacation ranges automatically add a soft prefer-work request for the Thursday before vacation starts when that date is in the same month
 - Generic scheduling rules support weekday counts and adjacent weekday pairs such as Friday+Saturday for a resident
-- Raw workload, weighted day values, preferences, back-to-back shifts, and rolling surplus fairness are optimized where possible
+- Raw workload, day-category counts, preferences, back-to-back shifts, and rolling category surplus fairness are optimized where possible
 
 ## Local Setup
 
@@ -145,9 +145,10 @@ Hard constraints:
 Soft objective weights:
 
 - Total workload is distributed by floor/ceiling fairness first.
-- Weighted workload points then distribute higher-value days: Monday-Thursday = 1, Friday = 1.5, Saturday = 2, and Sunday = 1.5.
-- Previous 3 calendar months discourage repeating surplus total shifts or weighted workload points for the same resident.
-- Higher PGY levels are protected from surplus total shifts and weighted workload points where feasible.
+- Monday-Thursday, Friday, Saturday, and Sunday counts are balanced independently after raw total shifts.
+- Category imbalance multipliers are Monday-Thursday = 1, Friday = 1.5, Saturday = 2, and Sunday = 1.5. Workload Points is informational, not an aggregate solver target.
+- Previous 3 calendar months discourage repeating surplus total shifts or surplus shifts in the same day category for the same resident.
+- Higher PGY levels are protected from surplus total shifts and surplus shifts within each day category where feasible.
 - Equal-cost leftover assignments use fresh random tie-breaking on each generate run.
 - Prefer-off violation: 100
 - Prefer-work miss: 10
