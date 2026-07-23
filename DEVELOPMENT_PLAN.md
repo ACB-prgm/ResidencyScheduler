@@ -73,9 +73,10 @@ Hard constraints implemented:
 Soft constraints implemented:
 
 - Fairly distribute total shifts using floor/ceiling targets.
-- Fairly distribute Sat/Sun weekend shifts using floor/ceiling targets.
-- Avoid repeating surplus total and Sat/Sun weekend shifts from the previous 3 calendar months where feasible.
-- Protect higher PGY levels from surplus total and weekend shifts where feasible.
+- Independently distribute Monday-Thursday, Friday, Saturday, and Sunday shifts using floor/ceiling targets.
+- Scale category imbalance penalties with configurable values: weekday 1, Friday 1.5, Saturday 2, and Sunday 1.5.
+- Avoid repeating surplus total shifts or same-category shifts from the previous 3 calendar months where feasible.
+- Protect higher PGY levels from surplus total shifts and surplus shifts within each category where feasible.
 - Randomize equal-cost leftover assignments on each solver run.
 - Penalize prefer-off violations.
 - Reward prefer-work matches.

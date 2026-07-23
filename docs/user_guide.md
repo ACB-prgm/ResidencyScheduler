@@ -11,7 +11,7 @@ Each year-month has one schedule. Scheduling rules, generated assignments, manua
 Residents are the people eligible for call scheduling.
 
 - `PGY level` is stored from 1 through 5.
-- Higher PGY levels are protected from surplus total shifts and surplus workload points when possible.
+- Higher PGY levels are protected from surplus total shifts and surplus shifts within each day category when possible.
 - Colors are used in the schedule calendar and must be unique.
 - Inactive residents are not used by the solver.
 
@@ -65,7 +65,9 @@ That resident will only work the required Friday+Saturday pair, and the rest of 
 
 ## Workload Fairness
 
-The solver balances raw total shifts first. It then uses configurable workload points to distribute higher-value call days: Monday through Thursday are 1 point, Friday and Sunday are 1.5 points, and Saturday is 2 points. The prior three months are included so the same resident is less likely to receive surplus total shifts or surplus workload points repeatedly.
+The solver balances raw total shifts first. Within that constraint, it independently balances each resident's Monday-through-Thursday, Friday, Saturday, and Sunday counts. The prior three months are included category by category, so a resident who recently received a surplus Saturday, for example, is less likely to receive the next surplus Saturday.
+
+The category values are configurable: Monday through Thursday are 1, Friday and Sunday are 1.5, and Saturday is 2. These values scale the cost of an imbalance in that specific category, making Saturday imbalance the most important to avoid. Workload Points remains an informational summary of the final schedule; the solver does not optimize a resident's aggregate point total.
 
 ## Generate Schedule
 
@@ -78,13 +80,14 @@ The page shows:
 - Workload summary
 	- Month shows only the selected month, L3M shows the selected month plus the prior two months, and YTD shows January through the selected month. Only saved assignments contribute.
 	- Weekday means Monday through Thursday. Friday, Saturday, and Sunday are displayed separately.
-	- Workload Points use Monday-Thursday = 1, Friday = 1.5, Saturday = 2, and Sunday = 1.5.
+	- Monday-Thursday, Friday, Saturday, and Sunday counts are balanced independently after raw total shifts. Category-specific surplus from the prior three months also affects the schedule.
+	- Workload Points use Monday-Thursday = 1, Friday = 1.5, Saturday = 2, and Sunday = 1.5. This column summarizes the final mix; it is not a separate aggregate solver target.
 - Soft prefer-off violations
 - Manual reassign and swap tools for unlocked assignments
 - ICS export
 - Google Calendar publishing
 
-Manual reassignments and swaps validate hard unavailable conflicts before saving. The optional hard assign setting creates dated hard assign requests that remain in effect on future solver runs.
+Edit Assignment defaults to Swap; choose Reassign to change only one shift. Before saving, the form reports whether the proposed edit would assign someone on a prefer-off date or remove someone from a prefer-work date. Soft preference impacts remain allowed with a warning, while hard conflicts must be resolved. The optional hard assign setting creates dated hard assign requests that remain in effect on future solver runs.
 
 ### Wiping a Local Schedule
 

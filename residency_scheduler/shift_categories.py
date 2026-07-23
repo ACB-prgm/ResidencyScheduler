@@ -4,7 +4,9 @@ from fractions import Fraction
 from math import lcm
 
 
-SHIFT_POINTS_BY_CATEGORY = {
+# One configuration drives both category-fairness priority and displayed workload points.
+# The solver never minimizes the aggregate point total; it balances each category separately.
+SHIFT_CATEGORY_WEIGHTS = {
 	"weekday": 1.0,
 	"friday": 1.5,
 	"saturday": 2.0,
@@ -23,11 +25,11 @@ SHIFT_CATEGORY_BY_WEEKDAY = {
 
 _POINT_FRACTIONS = {
 	category: Fraction(str(points))
-	for category, points in SHIFT_POINTS_BY_CATEGORY.items()
+	for category, points in SHIFT_CATEGORY_WEIGHTS.items()
 }
-SHIFT_POINT_SCALE = lcm(*(value.denominator for value in _POINT_FRACTIONS.values()))
-SHIFT_POINT_UNITS_BY_CATEGORY = {
-	category: int(value * SHIFT_POINT_SCALE)
+SHIFT_WEIGHT_SCALE = lcm(*(value.denominator for value in _POINT_FRACTIONS.values()))
+SHIFT_WEIGHT_UNITS_BY_CATEGORY = {
+	category: int(value * SHIFT_WEIGHT_SCALE)
 	for category, value in _POINT_FRACTIONS.items()
 }
 
@@ -40,8 +42,8 @@ def shift_category_for_weekday(weekday: int) -> str:
 
 
 def shift_points_for_weekday(weekday: int) -> float:
-	return SHIFT_POINTS_BY_CATEGORY[shift_category_for_weekday(weekday)]
+	return SHIFT_CATEGORY_WEIGHTS[shift_category_for_weekday(weekday)]
 
 
 def shift_point_units_for_weekday(weekday: int) -> int:
-	return SHIFT_POINT_UNITS_BY_CATEGORY[shift_category_for_weekday(weekday)]
+	return SHIFT_WEIGHT_UNITS_BY_CATEGORY[shift_category_for_weekday(weekday)]

@@ -12,12 +12,14 @@ from residency_scheduler.repository import (
 	delete_schedule_assignments,
 	delete_recurring_preference,
 	delete_schedule_request,
+	evaluate_assignment_preference_impacts,
 	find_hard_schedule_request_conflicts,
 	get_hard_schedule_requests_for_conflict_check,
 	get_or_create_schedule_period,
 	get_assignment_calendar,
 	get_calendar_months,
 	get_assignments,
+	get_expanded_schedule_requests,
 	get_period,
 	get_prior_assignment_history,
 	get_recurring_preferences_for_editor,
@@ -785,6 +787,33 @@ def test_swap_assignment_residents_rejects_hard_unavailable_target(isolated_db):
 
 	with pytest.raises(ValueError, match="hard unavailable"):
 		swap_assignment_residents(int(assignments.iloc[0].id), int(assignments.iloc[1].id))
+
+
+def test_proposed_assignment_edit_reports_prefer_off_and_prefer_work_impacts(isolated_db):
+	save_residents(
+		pd.DataFrame(
+			[
+				{"name": "Ada", "email": "ada@example.com", "max_shifts": 20, "min_shifts": None, "weight": 1, "active": 1},
+				{"name": "Ben", "email": "ben@example.com", "max_shifts": 20, "min_shifts": None, "weight": 1, "active": 1},
+			]
+		)
+	)
+	period_id = get_or_create_schedule_period(2026, 8, required_count=1)
+	create_schedule_request(1, "2026-08-01", "2026-08-01", "prefer_work", "soft", "Ada wants this shift")
+	create_schedule_request(2, "2026-08-01", "2026-08-01", "prefer_off", "soft", "Ben wants this off")
+
+	impacts = evaluate_assignment_preference_impacts(
+		get_expanded_schedule_requests(period_id),
+		[
+			{"resident_id": 1, "work_date": "2026-08-01", "action": "remove"},
+			{"resident_id": 2, "work_date": "2026-08-01", "action": "assign"},
+		],
+	)
+
+	assert list(impacts["resident_name"]) == ["Ada", "Ben"]
+	assert set(impacts["request_type"]) == {"prefer_off", "prefer_work"}
+	assert set(impacts["action"]) == {"assign", "remove"}
+	assert set(impacts["priority"]) == {"soft"}
 
 
 def test_delete_schedule_assignments_only_wipes_selected_month_assignments(isolated_db):
