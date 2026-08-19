@@ -4,6 +4,7 @@ import calendar
 
 import streamlit as st
 
+from residency_scheduler.auth import require_page_auth
 from residency_scheduler.cache import (
 	clear_month_data_cache,
 	get_cached_assignments,
@@ -12,6 +13,8 @@ from residency_scheduler.cache import (
 )
 from residency_scheduler.repository import update_schedule_period_settings
 from residency_scheduler.ui import flash_error, flash_success, render_page_header, render_user_guide
+
+require_page_auth()
 
 period_id = render_page_header(
 	"Residency Call Scheduler",

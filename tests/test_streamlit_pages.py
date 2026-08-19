@@ -82,6 +82,24 @@ def test_streamlit_script_loads_authenticated_without_exceptions(isolated_db, sc
 	assert not app.exception
 
 
+@pytest.mark.parametrize(
+	"script_path",
+	[
+		"pages/0_Home.py",
+		"pages/1_Residents.py",
+		"pages/2_Availability_and_Preferences.py",
+		"pages/3_Scheduling_Rules.py",
+		"pages/4_Generate_Schedule.py",
+	],
+)
+def test_direct_page_load_without_session_is_stopped_by_auth_gate(isolated_db, script_path: str):
+	app = AppTest.from_file(str(ROOT / script_path))
+	app.run(timeout=5)
+
+	assert not app.exception
+	assert not app.title or app.title[0].value == "Residency Scheduler"
+
+
 def test_unauthenticated_home_shows_sign_in_gate(isolated_db):
 	app = AppTest.from_file(str(ROOT / "app.py"))
 	app.run(timeout=5)
@@ -161,7 +179,6 @@ def test_generate_schedule_wipe_requires_confirmation_and_deletes_only_local_ass
 	save_assignments(period_id, [{"work_date": date.today().replace(day=1).isoformat(), "resident_id": 1}])
 	app = AppTest.from_file(str(ROOT / "pages/4_Generate_Schedule.py"))
 	auth_session = authenticated_session()
-	auth_session["scopes"] = ["openid", "email", "profile"]
 	app.session_state[AUTH_SESSION_KEY] = auth_session
 	app.run(timeout=5)
 
@@ -248,7 +265,6 @@ def test_edit_assignment_defaults_to_swap_and_warns_about_preference_impact(isol
 	)
 	app = AppTest.from_file(str(ROOT / "pages/4_Generate_Schedule.py"))
 	auth_session = authenticated_session()
-	auth_session["scopes"] = ["openid", "email", "profile"]
 	app.session_state[AUTH_SESSION_KEY] = auth_session
 	app.run(timeout=5)
 
@@ -274,7 +290,6 @@ def test_edit_assignment_blocks_hard_preference_impact(isolated_db):
 	create_schedule_request(2, first_date, first_date, "prefer_off", "hard", "Hard day off")
 	app = AppTest.from_file(str(ROOT / "pages/4_Generate_Schedule.py"))
 	auth_session = authenticated_session()
-	auth_session["scopes"] = ["openid", "email", "profile"]
 	app.session_state[AUTH_SESSION_KEY] = auth_session
 	app.run(timeout=5)
 

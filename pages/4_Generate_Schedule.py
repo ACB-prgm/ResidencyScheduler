@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import streamlit as st
 from streamlit_calendar import calendar
 
-from residency_scheduler.auth import get_current_auth_session
+from residency_scheduler.auth import require_page_auth
 from residency_scheduler.calendar.google import (
 	find_existing_period_events,
 	has_calendar_scopes,
@@ -134,7 +134,7 @@ def _clear_google_calendar_caches() -> None:
 	_clear_google_event_cache()
 
 
-auth_session = get_current_auth_session()
+auth_session = require_page_auth()
 
 period_id = render_page_header(
 	"Generate Schedule",

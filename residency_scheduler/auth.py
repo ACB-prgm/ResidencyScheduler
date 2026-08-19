@@ -105,6 +105,14 @@ def require_google_auth(render_sidebar: bool = True) -> dict[str, Any]:
 	st.stop()
 
 
+def require_page_auth() -> dict[str, Any]:
+	"""Initialize storage and enforce auth when Streamlit executes a page directly."""
+	from residency_scheduler.cache import ensure_database_initialized
+
+	ensure_database_initialized()
+	return require_google_auth(render_sidebar=False)
+
+
 def sign_out() -> None:
 	session = st.session_state.get(AUTH_SESSION_KEY)
 	google_sub = str((session or {}).get("google_sub") or "") if isinstance(session, dict) else ""

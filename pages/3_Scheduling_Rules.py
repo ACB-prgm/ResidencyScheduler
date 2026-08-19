@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import streamlit as st
 
+from residency_scheduler.auth import require_page_auth
 from residency_scheduler.cache import (
 	clear_month_data_cache,
 	get_cached_resident_options,
@@ -23,6 +24,8 @@ RULE_TYPE_LABELS = {
 	"away_rotation": "Away rotation",
 }
 RULE_TYPE_BY_LABEL = {label: value for value, label in RULE_TYPE_LABELS.items()}
+
+require_page_auth()
 
 
 def _rule_summary(row) -> str:

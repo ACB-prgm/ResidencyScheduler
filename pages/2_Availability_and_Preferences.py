@@ -5,7 +5,7 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
-from residency_scheduler.auth import current_user_is_allowed
+from residency_scheduler.auth import current_user_is_allowed, require_page_auth
 from residency_scheduler.cache import (
 	clear_schedule_request_cache,
 	get_cached_hard_schedule_requests_for_conflict_check,
@@ -43,6 +43,8 @@ REQUEST_TYPE_OPTIONS = [
 	"assign",
 ]
 RECURRING_TYPE_OPTIONS = ["prefer_off", "prefer_work"]
+
+require_page_auth()
 
 
 def _display_type(value: str) -> str:

@@ -4,10 +4,13 @@ import pandas as pd
 import streamlit as st
 from urllib.parse import quote
 
+from residency_scheduler.auth import require_page_auth
 from residency_scheduler.colors import RESIDENT_COLOR_PALETTE
 from residency_scheduler.cache import clear_all_data_caches, get_cached_residents
 from residency_scheduler.repository import save_residents
 from residency_scheduler.ui import flash_error, flash_success, render_page_header, render_user_guide
+
+require_page_auth()
 
 def color_swatch_data_uri(color: str | None) -> str:
 	if not color:
