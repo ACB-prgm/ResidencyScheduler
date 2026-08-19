@@ -334,6 +334,20 @@ def _schema_sql(dialect: str) -> str:
 		FOREIGN KEY (resident_id) REFERENCES residents(id) ON DELETE CASCADE
 	);
 
+	CREATE TABLE IF NOT EXISTS recurring_preferences (
+		id {id_type},
+		resident_id INTEGER NOT NULL,
+		request_type TEXT NOT NULL,
+		weekday INTEGER NOT NULL,
+		effective_start_date TEXT NOT NULL,
+		effective_end_date TEXT,
+		priority TEXT NOT NULL DEFAULT 'soft',
+		reason TEXT,
+		created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (resident_id) REFERENCES residents(id) ON DELETE CASCADE
+	);
+
 	CREATE TABLE IF NOT EXISTS schedule_rules (
 		id {id_type},
 		period_id INTEGER NOT NULL,
@@ -376,6 +390,10 @@ def _schema_sql(dialect: str) -> str:
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_schedule_requests_dates ON schedule_requests(start_date, end_date);
+	CREATE INDEX IF NOT EXISTS idx_recurring_preferences_dates
+		ON recurring_preferences(effective_start_date, effective_end_date);
+	CREATE INDEX IF NOT EXISTS idx_recurring_preferences_resident
+		ON recurring_preferences(resident_id);
 	CREATE INDEX IF NOT EXISTS idx_schedule_rules_period ON schedule_rules(period_id);
 	CREATE INDEX IF NOT EXISTS idx_assignments_period_date ON assignments(period_id, work_date);
 	"""

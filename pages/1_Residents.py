@@ -4,11 +4,13 @@ import pandas as pd
 import streamlit as st
 from urllib.parse import quote
 
-from residency_scheduler.auth import require_google_auth
+from residency_scheduler.auth import require_page_auth
 from residency_scheduler.colors import RESIDENT_COLOR_PALETTE
-from residency_scheduler.cache import clear_all_data_caches, ensure_database_initialized, get_cached_residents, preload_reference_data
+from residency_scheduler.cache import clear_all_data_caches, get_cached_residents
 from residency_scheduler.repository import save_residents
 from residency_scheduler.ui import flash_error, flash_success, render_page_header, render_user_guide
+
+require_page_auth()
 
 def color_swatch_data_uri(color: str | None) -> str:
 	if not color:
@@ -44,10 +46,6 @@ def _restore_hidden_ids(edited: pd.DataFrame, original: pd.DataFrame) -> pd.Data
 	restored["id"] = ids
 	return restored
 
-require_google_auth()
-ensure_database_initialized()
-preload_reference_data()
-
 render_page_header("Residents", "Maintain the active resident roster used by the scheduler.")
 render_user_guide(
 	"Residents",
@@ -55,7 +53,7 @@ render_user_guide(
 	Use this page to maintain the roster that the scheduler can assign.
 
 	- **Name:** the resident name shown in dropdowns, schedules, and calendar events.
-	- **PGY:** postgraduate year level from 1 through 5. Higher PGY levels are protected from surplus total and weekend shifts when feasible.
+	- **PGY:** postgraduate year level from 1 through 5. Higher PGY levels are protected from surplus total shifts and surplus shifts within each day category when feasible.
 	- **Min/Max:** optional monthly shift bounds. Min asks the solver to reach at least that many shifts; Max prevents assignments above the limit.
 	- **Email:** contact reference and app access control. Only residents with email addresses listed here can sign in and use the application.
 	- **Color/Swatch:** the color used for that resident in the schedule calendar. Colors must be unique.

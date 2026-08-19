@@ -11,7 +11,6 @@ from ortools.sat.python import cp_model
 from residency_scheduler.repository import (
 	HARD_UNAVAILABLE_TYPES,
 	SCHEDULE_RULE_TYPES,
-	WEEKEND_WEEKDAYS,
 	get_expanded_schedule_requests,
 	get_period,
 	get_prior_assignment_history,
@@ -20,12 +19,19 @@ from residency_scheduler.repository import (
 	record_solver_run,
 	save_assignments,
 )
+from residency_scheduler.shift_categories import (
+	SHIFT_WEIGHT_UNITS_BY_CATEGORY,
+	shift_category_for_weekday,
+)
 
-FAIR_DISTRIBUTION_PENALTY = 5000
+# Raw count balance remains the first fairness tier. Categories are then balanced independently;
+# category weights control the relative cost of an imbalance, not an aggregate points target.
+TOTAL_FAIR_DISTRIBUTION_PENALTY = 5000
+CATEGORY_FAIR_DISTRIBUTION_PENALTY = 500
 TOTAL_SURPLUS_WEIGHT_PENALTY = 50
-WEEKEND_SURPLUS_WEIGHT_PENALTY = 150
+CATEGORY_SURPLUS_WEIGHT_PENALTY = 15
 ROLLING_TOTAL_SURPLUS_PENALTY = 800
-ROLLING_WEEKEND_SURPLUS_PENALTY = 1200
+ROLLING_CATEGORY_SURPLUS_PENALTY = 300
 RANDOM_TIE_BREAK_MAX = 100
 SOFT_AWAY_ROTATION_PENALTY = 100000
 
@@ -38,7 +44,7 @@ class SolverResult:
 	warnings: list[str]
 
 
-def solve_period(period_id: int, max_time_seconds: int = 30, random_seed: int | None = None) -> SolverResult:
+def solve_period(period_id: int, max_time_seconds: int = 120, random_seed: int | None = None) -> SolverResult:
 	period = get_period(period_id)
 	residents = get_residents(active_only=True)
 	requests = get_expanded_schedule_requests(period_id)
@@ -73,14 +79,14 @@ def solve_period(period_id: int, max_time_seconds: int = 30, random_seed: int | 
 
 	hard_unavailable = requests[
 		(requests["priority"].str.lower() == "hard")
-		& (requests["request_type"].str.lower().isin(HARD_UNAVAILABLE_TYPES))
+		& (requests["request_type"].str.lower().isin(HARD_UNAVAILABLE_TYPES | {"prefer_off"}))
 	]
 	for row in hard_unavailable.itertuples():
 		model.Add(works[(int(row.resident_id), str(row.work_date))] == 0)
 
 	hard_assignments = requests[
 		(requests["priority"].str.lower() == "hard")
-		& (requests["request_type"].str.lower() == "assign")
+		& (requests["request_type"].str.lower().isin({"assign", "prefer_work"}))
 	]
 	for row in hard_assignments.itertuples():
 		model.Add(works[(int(row.resident_id), str(row.work_date))] == 1)
@@ -116,34 +122,39 @@ def solve_period(period_id: int, max_time_seconds: int = 30, random_seed: int | 
 		total_required=total_required_shifts,
 		max_count=len(date_keys),
 		prefix="total",
+		fair_distribution_penalty=TOTAL_FAIR_DISTRIBUTION_PENALTY,
 		surplus_weight_penalty=TOTAL_SURPLUS_WEIGHT_PENALTY,
 	)
 
-	weekend_dates = [d.isoformat() for d in dates if d.weekday() in WEEKEND_WEEKDAYS]
-	if weekend_dates:
-		weekend_shift_counts = {
-			resident_id: sum(works[(resident_id, work_date)] for work_date in weekend_dates)
+	category_surplus: dict[str, dict[int, cp_model.IntVar]] = {}
+	for category, multiplier_units in SHIFT_WEIGHT_UNITS_BY_CATEGORY.items():
+		category_dates = [
+			d.isoformat()
+			for d in dates
+			if shift_category_for_weekday(d.weekday()) == category
+		]
+		category_shift_counts = {
+			resident_id: sum(works[(resident_id, work_date)] for work_date in category_dates)
 			for resident_id in resident_ids
 		}
-		weekend_surplus = _add_distribution_objective(
+		category_surplus[category] = _add_distribution_objective(
 			model=model,
 			objective_terms=objective_terms,
 			residents=residents,
-			counts_by_resident=weekend_shift_counts,
-			total_required=len(weekend_dates) * required_count,
-			max_count=len(weekend_dates),
-			prefix="weekend",
-			surplus_weight_penalty=WEEKEND_SURPLUS_WEIGHT_PENALTY,
+			counts_by_resident=category_shift_counts,
+			total_required=len(category_dates) * required_count,
+			max_count=len(category_dates),
+			prefix=f"category_{category}",
+			fair_distribution_penalty=CATEGORY_FAIR_DISTRIBUTION_PENALTY * multiplier_units,
+			surplus_weight_penalty=CATEGORY_SURPLUS_WEIGHT_PENALTY * multiplier_units,
 		)
-	else:
-		weekend_surplus = {}
 
 	_add_rolling_surplus_objective(
 		objective_terms=objective_terms,
 		resident_ids=resident_ids,
 		prior_history=prior_history,
 		total_surplus=total_surplus,
-		weekend_surplus=weekend_surplus,
+		category_surplus=category_surplus,
 	)
 
 	for row in requests.itertuples():
@@ -302,6 +313,7 @@ def _add_distribution_objective(
 	total_required: int,
 	max_count: int,
 	prefix: str,
+	fair_distribution_penalty: int,
 	surplus_weight_penalty: int,
 ) -> dict[int, cp_model.IntVar]:
 	resident_count = len(counts_by_resident)
@@ -321,8 +333,8 @@ def _add_distribution_objective(
 		model.Add(surplus >= count - base)
 		surplus_by_resident[resident_id] = surplus
 
-		objective_terms.append(under_base * FAIR_DISTRIBUTION_PENALTY)
-		objective_terms.append(over_ceiling * FAIR_DISTRIBUTION_PENALTY)
+		objective_terms.append(under_base * fair_distribution_penalty)
+		objective_terms.append(over_ceiling * fair_distribution_penalty)
 		objective_terms.append(surplus * _weight_penalty(row.weight, surplus_weight_penalty))
 	return surplus_by_resident
 
@@ -332,42 +344,54 @@ def _add_rolling_surplus_objective(
 	resident_ids: list[int],
 	prior_history: pd.DataFrame,
 	total_surplus: dict[int, cp_model.IntVar],
-	weekend_surplus: dict[int, cp_model.IntVar],
+	category_surplus: dict[str, dict[int, cp_model.IntVar]],
 ) -> None:
 	if prior_history.empty:
 		return
 
-	prior_total_surplus = _historical_surplus_counts(prior_history, resident_ids, weekend_only=False)
-	prior_weekend_surplus = _historical_surplus_counts(prior_history, resident_ids, weekend_only=True)
+	prior_total_surplus = _historical_surplus_counts(prior_history, resident_ids)
+	prior_category_surplus = {
+		category: _historical_surplus_counts(prior_history, resident_ids, category=category)
+		for category in category_surplus
+	}
 
 	for resident_id in resident_ids:
 		total_penalty = prior_total_surplus.get(resident_id, 0) * ROLLING_TOTAL_SURPLUS_PENALTY
 		if total_penalty and resident_id in total_surplus:
 			objective_terms.append(total_surplus[resident_id] * total_penalty)
 
-		weekend_penalty = prior_weekend_surplus.get(resident_id, 0) * ROLLING_WEEKEND_SURPLUS_PENALTY
-		if weekend_penalty and resident_id in weekend_surplus:
-			objective_terms.append(weekend_surplus[resident_id] * weekend_penalty)
+		for category, current_surplus in category_surplus.items():
+			category_penalty = (
+				prior_category_surplus[category].get(resident_id, 0)
+				* ROLLING_CATEGORY_SURPLUS_PENALTY
+				* SHIFT_WEIGHT_UNITS_BY_CATEGORY[category]
+			)
+			if category_penalty and resident_id in current_surplus:
+				objective_terms.append(current_surplus[resident_id] * category_penalty)
 
 
-def _historical_surplus_counts(prior_history: pd.DataFrame, resident_ids: list[int], weekend_only: bool) -> dict[int, int]:
+def _historical_surplus_counts(
+	prior_history: pd.DataFrame,
+	resident_ids: list[int],
+	category: str | None = None,
+) -> dict[int, int]:
 	surplus_counts = {resident_id: 0 for resident_id in resident_ids}
 	resident_count = len(resident_ids)
 	if resident_count == 0:
 		return surplus_counts
 
 	history = prior_history.copy()
-	if weekend_only:
-		history = history[history["is_weekend"].astype(int) == 1]
+	if category is not None:
+		history = history[history["shift_category"] == category]
 	if history.empty:
 		return surplus_counts
 
 	for _, month_assignments in history.groupby(["year", "month", "period_id"]):
 		total_required = len(month_assignments)
+		counts = month_assignments["resident_id"].astype(int).value_counts().to_dict()
 		if total_required == 0:
 			continue
 		base = total_required // resident_count
-		counts = month_assignments["resident_id"].astype(int).value_counts().to_dict()
 		for resident_id in resident_ids:
 			surplus_counts[resident_id] += max(0, counts.get(resident_id, 0) - base)
 	return surplus_counts
@@ -406,10 +430,19 @@ def _validate_inputs(
 	errors: list[str] = []
 	valid_residents = set(residents["id"].astype(int).tolist())
 	valid_dates = {item.isoformat() for item in dates}
+	resident_names = {
+		int(row.id): str(row.name)
+		for row in residents.itertuples()
+	}
+
+	def display_name(resident_id: int, fallback: str | None = None) -> str:
+		return resident_names.get(int(resident_id), str(fallback or "Unknown resident"))
 
 	if required_count > len(valid_residents):
+		active_names = ", ".join(sorted(resident_names.values())) or "none"
 		errors.append(
-			f"Each date requires {required_count} resident(s), but only {len(valid_residents)} active resident(s) exist."
+			f"Each date requires {required_count} resident(s), but only {len(valid_residents)} active resident(s) exist: "
+			f"{active_names}."
 		)
 
 	total_required = len(dates) * required_count
@@ -421,65 +454,86 @@ def _validate_inputs(
 		else:
 			has_unbounded_capacity = True
 	if not has_unbounded_capacity and configured_capacity < total_required:
+		capacity_details = ", ".join(
+			f"{row.name}: {int(row.max_shifts)}"
+			for row in residents.sort_values("name").itertuples()
+		)
 		errors.append(
-			f"Configured max shifts allow only {configured_capacity} total assignment(s), but the period requires {total_required}."
+			f"Configured max shifts allow only {configured_capacity} total assignment(s), but the period requires "
+			f"{total_required}. Resident limits: {capacity_details}."
 		)
 
 	for row in requests.itertuples():
+		resident_name = display_name(row.resident_id, getattr(row, "resident_name", None))
 		if int(row.resident_id) not in valid_residents:
-			errors.append(f"Request references inactive/missing resident_id {row.resident_id}.")
+			errors.append(f"Request references inactive or missing resident {resident_name}.")
 		if str(row.work_date) not in valid_dates:
-			errors.append(f"Request date {row.work_date} is outside the selected month.")
+			errors.append(f"{resident_name}'s request date {row.work_date} is outside the selected month.")
 
 	for row in rules.itertuples():
+		resident_name = display_name(row.resident_id, getattr(row, "resident_name", None))
 		if int(row.resident_id) not in valid_residents:
-			errors.append(f"Rule references inactive/missing resident_id {row.resident_id}.")
+			errors.append(f"Rule references inactive or missing resident {resident_name}.")
 		rule_type = str(row.rule_type).lower()
 		if rule_type not in SCHEDULE_RULE_TYPES:
-			errors.append("Only weekday_count, weekday_pair_count, and away_rotation rules are supported.")
+			errors.append(
+				f"{resident_name}'s rule is not supported. Use weekday_count, weekday_pair_count, or away_rotation."
+			)
 		if rule_type != "away_rotation" and str(row.comparator).lower() != "exactly":
-			errors.append("Only exactly rules are supported.")
+			errors.append(f"{resident_name}'s rule must use the exactly comparator.")
 		target_count = int(row.target_count)
 		if rule_type == "weekday_pair_count":
 			if pd.isna(row.paired_weekday):
-				errors.append("Paired weekday is required for weekday_pair_count rules.")
+				errors.append(f"{resident_name}'s weekday-pair rule requires a paired weekday.")
 				continue
 			weekday = int(row.weekday)
 			paired_weekday = int(row.paired_weekday)
 			if paired_weekday != (weekday + 1) % 7:
-				errors.append("Paired weekday rules must use adjacent weekdays.")
+				errors.append(f"{resident_name}'s paired weekday rule must use adjacent weekdays.")
 				continue
 			available_pairs = len(_paired_date_keys(dates, weekday, paired_weekday))
 			if target_count > available_pairs:
 				errors.append(
-					f"Rule target count {target_count} exceeds {available_pairs} available adjacent weekday pair(s)."
+					f"{resident_name}'s rule target count {target_count} exceeds "
+					f"{available_pairs} available adjacent weekday pair(s)."
 				)
 
 	hard_assignments = requests[
 		(requests["priority"].str.lower() == "hard")
-		& (requests["request_type"].str.lower() == "assign")
+		& (requests["request_type"].str.lower().isin({"assign", "prefer_work"}))
 	]
 	if not hard_assignments.empty:
 		for work_date, group in hard_assignments.groupby("work_date"):
-			if len(group) > required_count:
-				errors.append(f"{work_date} has {len(group)} hard assign request(s) but only requires {required_count} resident(s).")
+			hard_work_count = group["resident_id"].astype(int).nunique()
+			if hard_work_count > required_count:
+				resident_list = ", ".join(
+					display_name(resident_id)
+					for resident_id in sorted(group["resident_id"].astype(int).unique())
+				)
+				errors.append(
+					f"{work_date} has {hard_work_count} hard assign request(s) or hard prefer-work request(s), "
+					f"but only requires {required_count} resident(s): {resident_list}."
+				)
 
 		for resident_id, group in hard_assignments.groupby("resident_id"):
 			matches = residents.loc[residents["id"].astype(int) == int(resident_id), "max_shifts"]
-			if not matches.empty and pd.notna(matches.iloc[0]) and len(group) > int(matches.iloc[0]):
+			hard_work_count = group["work_date"].astype(str).nunique()
+			if not matches.empty and pd.notna(matches.iloc[0]) and hard_work_count > int(matches.iloc[0]):
 				errors.append(
-					f"resident_id {resident_id} has {len(group)} hard assign request(s), exceeding max_shifts {int(matches.iloc[0])}."
+					f"{display_name(resident_id)} has {hard_work_count} hard work request(s), "
+					f"exceeding max_shifts {int(matches.iloc[0])}."
 				)
 
 	hard_unavailable = requests[
 		(requests["priority"].str.lower() == "hard")
-		& (requests["request_type"].str.lower().isin(HARD_UNAVAILABLE_TYPES))
+		& (requests["request_type"].str.lower().isin(HARD_UNAVAILABLE_TYPES | {"prefer_off"}))
 	]
 	if not hard_assignments.empty and not hard_unavailable.empty:
 		conflicts = hard_assignments.merge(hard_unavailable, on=["resident_id", "work_date"], suffixes=("_assign", "_unavailable"))
 		for row in conflicts.itertuples():
 			errors.append(
-				f"Hard request conflict: resident_id {row.resident_id} is assigned on {row.work_date} but marked hard unavailable."
+				f"Hard request conflict: {display_name(row.resident_id)} must work on {row.work_date} "
+				"but is marked hard unavailable/off."
 			)
 
 	hard_away_rules = rules[
@@ -499,6 +553,11 @@ def _validate_inputs(
 		}
 		available_count = len(valid_residents - unavailable_residents - away_blocked_residents)
 		if available_count < required_count:
-			errors.append(f"{work_date} has only {available_count} available resident(s), but requires {required_count}.")
+			blocked_residents = unavailable_residents | away_blocked_residents
+			blocked_names = ", ".join(display_name(resident_id) for resident_id in sorted(blocked_residents)) or "none"
+			errors.append(
+				f"{work_date} has only {available_count} available resident(s), but requires {required_count}. "
+				f"Blocked residents: {blocked_names}."
+			)
 
 	return errors

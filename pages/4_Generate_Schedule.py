@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import streamlit as st
 from streamlit_calendar import calendar
 
-from residency_scheduler.auth import require_google_auth
+from residency_scheduler.auth import require_page_auth
 from residency_scheduler.calendar.google import (
 	find_existing_period_events,
 	has_calendar_scopes,
@@ -16,14 +16,15 @@ from residency_scheduler.calendar.google import (
 from residency_scheduler.calendar.ical import build_fullcalendar_events, build_ical_calendar
 from residency_scheduler.cache import (
 	clear_month_data_cache,
-	ensure_database_initialized,
+	get_cached_expanded_schedule_requests,
 	get_cached_month_context,
 	get_cached_resident_options,
 	get_cached_residents,
 	get_cached_workload_summary_for_scope,
-	preload_reference_data,
 )
 from residency_scheduler.repository import (
+	delete_schedule_assignments,
+	evaluate_assignment_preference_impacts,
 	get_user_default_google_calendar_id,
 	set_user_default_google_calendar_id,
 	swap_assignment_residents,
@@ -40,6 +41,27 @@ GOOGLE_WIPE_LAST_KEY = "google_wipe_last_signature"
 GOOGLE_CALENDARS_CACHE_KEY = "google_calendar_list_cache"
 GOOGLE_EXISTING_EVENTS_CACHE_KEY = "google_existing_events_cache"
 GOOGLE_PUBLISH_DUPLICATE_WINDOW = timedelta(seconds=60)
+
+
+def _render_preference_impact_notice(impacts) -> bool:
+	if impacts.empty:
+		return False
+
+	details = []
+	for row in impacts.itertuples():
+		action = "assigning" if row.action == "assign" else "removing"
+		description = f" ({row.reason})" if str(row.reason or "").strip() else ""
+		details.append(
+			f"{row.resident_name}: {action} the {row.work_date} shift would violate "
+			f"{str(row.request_type).replace('_', ' ')} [{str(row.priority).lower()}]{description}"
+		)
+	message = "Proposed preference impact:\n\n- " + "\n- ".join(details)
+	has_hard_conflict = bool(impacts["priority"].astype(str).str.lower().eq("hard").any())
+	if has_hard_conflict:
+		st.error(message + "\n\nResolve the hard conflict before saving.")
+	else:
+		st.warning(message)
+	return has_hard_conflict
 
 
 def _publish_signature(period_id: int, calendar_id: str, assignments) -> str:
@@ -112,9 +134,7 @@ def _clear_google_calendar_caches() -> None:
 	_clear_google_event_cache()
 
 
-auth_session = require_google_auth()
-ensure_database_initialized()
-preload_reference_data()
+auth_session = require_page_auth()
 
 period_id = render_page_header(
 	"Generate Schedule",
@@ -124,29 +144,40 @@ period_id = render_page_header(
 render_user_guide(
 	"Generate Schedule",
 	"""
-	Use this page to generate, review, adjust, and publish the selected month.
+	Use this page to generate, review, adjust, publish, export, or clear the selected month. The Year-Month selector controls every action on this page.
 
-	- **Run scheduler:** creates assignments for the month using active residents, availability, preferences, scheduling rules, and rolling fairness from prior months.
-	- **Calendar:** shows the generated schedule by date.
-	- **Workload summary:** shows total shifts, weekend shifts, hard assigned shifts, and manual shifts by resident.
-	  - Use the range selector to view the selected Month, L3M (selected month plus the prior two months), or YTD (January through the selected month).
-	- **Preference violations:** lists soft prefer-off entries that could not be honored.
-	- **Edit Assignment:** lets you manually reassign one unlocked assignment or swap residents between two unlocked assignments.
-	- **Google Calendar publishing:** writes the current schedule to a selected writable Google Calendar after deleting only prior Residency Scheduler events for the same month and calendar.
-	- **ICS export:** downloads a single call-schedule calendar file.
-	- **Developer details:** shows recent solver run diagnostics for troubleshooting.
+	### Generate and clear
+	- **Solver max time** is the maximum time the solver may search for a better result; it may finish sooner. Longer limits can improve difficult schedules.
+	- **Run scheduler** uses active residents, dated and recurring preferences, scheduling rules, and rolling fairness from prior months. Running it again replaces all current local assignments for the selected month, including manual edits.
+	- **Wipe current schedule** permanently deletes only the selected month's local assignments. It preserves residents, availability/preferences, scheduling rules, hard assign requests, and solver run history. It does not remove published Google Calendar events; wipe those first in the Google Calendar section when needed.
+
+	### Review and edit
+	- **Calendar** shows one color-coded, all-day display entry on each call shift's start date. It is read-only; use Edit Assignment for changes.
+	- **Workload summary** shows total shifts, Monday-Thursday weekday shifts, Friday shifts, Saturday shifts, Sunday shifts, informational workload points, hard assigned shifts, and manual shifts by resident.
+	  - **Month** uses the selected month, **L3M** uses the selected month plus the prior two months, and **YTD** uses January through the selected month. Only months with saved assignments contribute.
+	  - Raw total shifts are balanced first. Within that constraint, the solver independently balances each resident's Monday-Thursday, Friday, Saturday, and Sunday counts, including category-specific surplus from the prior three months.
+	  - Category values are configurable: Monday-Thursday = 1 point, Friday = 1.5 points, Saturday = 2 points, and Sunday = 1.5 points. They make a Saturday-count imbalance more costly than a Friday/Sunday or weekday imbalance. **Workload Points** displays the resulting mix for comparison; the solver does not optimize the aggregate point total.
+	- **Preference violations** lists soft prefer-off requests that received an assignment. Hard requests cannot appear as violations because they are mandatory.
+	- **Edit Assignment** defaults to swapping two unlocked assignments, or you can choose Reassign for a single shift. The form warns when the proposed change would assign someone on a prefer-off date or remove someone from a prefer-work date. Soft preference impacts remain allowed; hard conflicts must be resolved before saving. Selecting "Create hard assign request" also saves dated hard assign requests that remain in effect on future solver runs and survive a local schedule wipe.
+
+	### Publish and troubleshoot
+	- **Google Calendar publishing** remembers your selected writable calendar. Publishing deletes only prior Residency Scheduler events for this month in that calendar, then writes the current schedule as all-day events. Residents with email addresses are added as attendees and receive Google invitation/update emails.
+	- **Refresh Google Calendar status** checks the calendar again. **Wipe Scheduler Events** removes only app-generated events for this month from the selected Google Calendar and does not change the local schedule.
+	- **ICS export** downloads a one-time calendar file with 6:00 PM-7:00 AM shifts. Importing it does not create a live sync.
+	- **Developer details** retains the latest solver status, score, and warnings for troubleshooting, even after local assignments are wiped.
 	""",
 )
 month_context = get_cached_month_context(period_id)
 period = month_context["period"]
-max_time = st.slider("Solver max time, seconds", min_value=5, max_value=120, value=30, step=5)
+assignments = month_context["assignments"]
+max_time = st.slider("Solver max time, seconds", min_value=5, max_value=120, value=120, step=5)
 
 if st.button("Run scheduler", type="primary"):
 	with st.spinner("Generating schedule..."):
 		result = solve_period(period_id, max_time_seconds=max_time)
 
 	if result.assignments:
-		flash_success(f"Solver status: {result.status}. Objective score: {result.objective_score}.")
+		flash_success(f"Schedule generated. Solver status: {result.status}.")
 	else:
 		flash_error(f"Solver status: {result.status}.")
 
@@ -155,50 +186,89 @@ if st.button("Run scheduler", type="primary"):
 	clear_month_data_cache()
 	st.rerun()
 
-assignments = month_context["assignments"]
-if not assignments.empty:
-	calendar_col, workload_col = st.columns([2, 1], gap="large")
-	with calendar_col:
-		st.markdown("### Calendar")
-		calendar(
-			events=build_fullcalendar_events(assignments),
-			options={
-				"initialView": "dayGridMonth",
-				"initialDate": f"{int(period['year'])}-{int(period['month']):02d}-01",
-				"height": "auto",
-				"editable": False,
-				"selectable": False,
-				"headerToolbar": {
-					"left": "prev,next today",
-					"center": "title",
-					"right": "dayGridMonth,listMonth",
-				},
-			},
-			key=f"assignment_calendar_{period_id}",
+with st.expander("Wipe current schedule"):
+	if assignments.empty:
+		st.info("No local assignments exist for the selected month.")
+	else:
+		month_label = f"{int(period['year'])}-{int(period['month']):02d}"
+		st.warning(
+			f"This permanently deletes {len(assignments)} local assignment(s) for {month_label}, including manual edits. "
+			"It does not delete Google Calendar events, availability/preferences, scheduling rules, hard assign requests, "
+			"or solver run history. Wipe published Google Calendar events first when needed."
 		)
+		confirmation_key = f"confirm_local_schedule_wipe_{period_id}"
+		confirmed = st.checkbox(
+			"I understand that the selected month's local assignments will be permanently deleted.",
+			key=confirmation_key,
+		)
+		if st.button("Delete local schedule", disabled=not confirmed):
+			deleted_count = delete_schedule_assignments(int(period_id))
+			st.session_state.pop(confirmation_key, None)
+			clear_month_data_cache()
+			flash_success(f"Deleted {deleted_count} local assignment(s) for {month_label}.")
+			st.rerun()
 
-	with workload_col:
-		st.markdown("### Workload summary")
-		workload_range = st.radio(
-			"Workload range",
-			["Month", "L3M", "YTD"],
-			horizontal=True,
-			label_visibility="collapsed",
-			key=f"workload_range_{period_id}",
-		)
-		summary = get_cached_workload_summary_for_scope(period_id, workload_range)
-		st.caption(f"Showing workload: {workload_range}")
-		metric_cols = st.columns(2)
-		metric_cols[0].metric("Total shifts", int(summary["total_shifts"].sum()) if not summary.empty else 0)
-		metric_cols[1].metric("Violations", len(month_context["preference_violations"]))
-		st.dataframe(summary, width="stretch", hide_index=True, key=f"workload_summary_{period_id}_{workload_range.lower()}")
+if not assignments.empty:
+	st.markdown("### Calendar")
+	calendar(
+		events=build_fullcalendar_events(assignments),
+		options={
+			"initialView": "dayGridMonth",
+			"initialDate": f"{int(period['year'])}-{int(period['month']):02d}-01",
+			"height": "auto",
+			"editable": False,
+			"selectable": False,
+			"headerToolbar": {
+				"left": "prev,next today",
+				"center": "title",
+				"right": "dayGridMonth,listMonth",
+			},
+		},
+		key=f"assignment_calendar_{period_id}",
+	)
+
+	st.markdown("### Workload summary")
+	workload_range = st.radio(
+		"Workload range",
+		["Month", "L3M", "YTD"],
+		horizontal=True,
+		label_visibility="collapsed",
+		key=f"workload_range_{period_id}",
+	)
+	summary = get_cached_workload_summary_for_scope(period_id, workload_range)
+	st.caption(f"Showing workload: {workload_range}")
+	metric_cols = st.columns(3)
+	metric_cols[0].metric("Total shifts", int(summary["total_shifts"].sum()) if not summary.empty else 0)
+	metric_cols[1].metric("Workload points", f"{summary['workload_points'].sum():.1f}" if not summary.empty else "0.0")
+	metric_cols[2].metric("Violations", len(month_context["preference_violations"]))
+	display_summary = summary.rename(
+		columns={
+			"resident_name": "Resident",
+			"total_shifts": "Total Shifts",
+			"weekday_shifts": "Weekday Shifts",
+			"friday_shifts": "Friday Shifts",
+			"saturday_shifts": "Saturday Shifts",
+			"sunday_shifts": "Sunday Shifts",
+			"workload_points": "Workload Points",
+			"hard_assigned_shifts": "Hard Assigned Shifts",
+			"manual_shifts": "Manual Shifts",
+		}
+	)
+	st.dataframe(
+		display_summary,
+		width="stretch",
+		hide_index=True,
+		column_config={"Workload Points": st.column_config.NumberColumn(format="%.1f")},
+		key=f"workload_summary_{period_id}_{workload_range.lower()}",
+	)
 
 	st.markdown("### Preference violations")
 	violations = month_context["preference_violations"]
 	if violations.empty:
 		st.success("No prefer-off violations in the current schedule.")
 	else:
-		st.dataframe(violations, width="stretch", hide_index=True)
+		display_violations = violations.rename(columns={"reason": "Description"})
+		st.dataframe(display_violations, width="stretch", hide_index=True)
 
 	with st.expander("Edit Assignment"):
 		residents = get_cached_residents(active_only=True)
@@ -206,15 +276,16 @@ if not assignments.empty:
 		if residents.empty or editable_assignments.empty:
 			st.info("No unlocked assignments are available for manual edits.")
 		else:
+			expanded_requests = get_cached_expanded_schedule_requests(period_id)
 			assignment_options = {
 				f"{row.work_date} · {row.resident_name}": int(row.id)
 				for row in editable_assignments.itertuples()
 			}
 			assignments_by_id = {int(row.id): row for row in editable_assignments.itertuples()}
 			resident_options = get_cached_resident_options(active_only=True)
-			mode = st.radio("Edit mode", ["Reassign", "Swap"], horizontal=True)
+			mode = st.radio("Edit mode", ["Swap", "Reassign"], horizontal=True, index=0)
 			make_locked = st.checkbox("Create hard assign request from this edit")
-			lock_reason = st.text_input("Reason", value="Manual review edit")
+			lock_reason = st.text_input("Description", value="Manual review edit")
 
 			if mode == "Reassign":
 				assignment_label = st.selectbox("Assignment", list(assignment_options.keys()), key="reassign_assignment")
@@ -229,11 +300,29 @@ if not assignments.empty:
 					st.warning("No alternate active resident is available for reassignment.")
 				else:
 					resident_label = st.selectbox("New resident", list(filtered_resident_options.keys()), key="reassign_resident")
-					if st.button("Save reassignment", type="primary"):
+					new_resident_id = filtered_resident_options[resident_label]
+					current_assignment = assignments_by_id[assignment_id]
+					impacts = evaluate_assignment_preference_impacts(
+						expanded_requests,
+						[
+							{
+								"resident_id": current_resident_id,
+								"work_date": str(current_assignment.work_date),
+								"action": "remove",
+							},
+							{
+								"resident_id": new_resident_id,
+								"work_date": str(current_assignment.work_date),
+								"action": "assign",
+							},
+						],
+					)
+					has_hard_conflict = _render_preference_impact_notice(impacts)
+					if st.button("Save reassignment", type="primary", disabled=has_hard_conflict):
 						try:
 							update_assignment_resident(
 								assignment_id,
-								filtered_resident_options[resident_label],
+								new_resident_id,
 								make_locked=make_locked,
 								lock_reason=lock_reason,
 							)
@@ -257,11 +346,40 @@ if not assignments.empty:
 					st.warning("No swap targets are available with a different resident.")
 				else:
 					to_label = st.selectbox("To assignment", list(to_options.keys()), key="swap_to_assignment")
-					if st.button("Save swap", type="primary"):
+					to_assignment_id = to_options[to_label]
+					from_assignment = assignments_by_id[from_assignment_id]
+					to_assignment = assignments_by_id[to_assignment_id]
+					impacts = evaluate_assignment_preference_impacts(
+						expanded_requests,
+						[
+							{
+								"resident_id": int(from_assignment.resident_id),
+								"work_date": str(from_assignment.work_date),
+								"action": "remove",
+							},
+							{
+								"resident_id": int(to_assignment.resident_id),
+								"work_date": str(to_assignment.work_date),
+								"action": "remove",
+							},
+							{
+								"resident_id": int(to_assignment.resident_id),
+								"work_date": str(from_assignment.work_date),
+								"action": "assign",
+							},
+							{
+								"resident_id": int(from_assignment.resident_id),
+								"work_date": str(to_assignment.work_date),
+								"action": "assign",
+							},
+						],
+					)
+					has_hard_conflict = _render_preference_impact_notice(impacts)
+					if st.button("Save swap", type="primary", disabled=has_hard_conflict):
 						try:
 							swap_assignment_residents(
 								from_assignment_id,
-								to_options[to_label],
+								to_assignment_id,
 								make_locked=make_locked,
 								lock_reason=lock_reason,
 							)

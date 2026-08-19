@@ -11,19 +11,22 @@ Each year-month has one schedule. Scheduling rules, generated assignments, manua
 Residents are the people eligible for call scheduling.
 
 - `PGY level` is stored from 1 through 5.
-- Higher PGY levels are protected from surplus total shifts and surplus weekend shifts when possible.
+- Higher PGY levels are protected from surplus total shifts and surplus shifts within each day category when possible.
 - Colors are used in the schedule calendar and must be unique.
 - Inactive residents are not used by the solver.
 
 ## Availability and Preferences
 
-Availability and Preferences are date-based entries. An entry can cover one date or a date range, and ranges can cross month boundaries. Cross-month entries appear on every selected month they overlap.
+Availability and Preferences can be dated entries or recurring weekly preferences. Dated entries can cover one date or a date range, and ranges can cross month boundaries. Cross-month entries appear on every selected month they overlap.
 
 - `vacation`, `unavailable`, `approved_absence`, and `medical_leave` default to hard.
 - `assign` defaults to hard and forces the resident onto the selected date.
 - `prefer_off` and `prefer_work` default to soft.
+- Recurring `prefer_off` and `prefer_work` entries apply weekly on one weekday, either indefinitely or through an end date, and are always soft.
 - Hard availability and preferences must be honored by the solver.
 - Soft availability and preferences affect the solver objective but can be violated if needed.
+- A dated preference overrides a recurring preference for the same resident and date. Duplicate preferences are evaluated once.
+- `Description` is optional context shown with the saved entry.
 
 Vacation ranges automatically add a soft `prefer_work` preference for the Thursday before vacation starts when that Thursday is inside the selected month.
 
@@ -60,24 +63,35 @@ Example: if a resident is away but must cover one Friday+Saturday pair, add both
 
 That resident will only work the required Friday+Saturday pair, and the rest of the month will be spread across the other eligible residents.
 
-## Weekend Fairness
+## Workload Fairness
 
-Weekend shifts are Friday, Saturday, and Sunday. The solver balances these weekend shifts across residents when possible and also looks at the prior three months to avoid repeatedly giving the same resident surplus weekend burden.
+The solver balances raw total shifts first. Within that constraint, it independently balances each resident's Monday-through-Thursday, Friday, Saturday, and Sunday counts. The prior three months are included category by category, so a resident who recently received a surplus Saturday, for example, is less likely to receive the next surplus Saturday.
+
+The category values are configurable: Monday through Thursday are 1, Friday and Sunday are 1.5, and Saturday is 2. These values scale the cost of an imbalance in that specific category, making Saturday imbalance the most important to avoid. Workload Points remains an informational summary of the final schedule; the solver does not optimize a resident's aggregate point total.
 
 ## Generate Schedule
 
-Generate Schedule runs the solver for the selected month. The page shows:
+Generate Schedule runs the solver for the selected month. The solver max time is an upper limit; the solver may finish sooner. Running the solver again replaces the current local assignments, including manual edits. The objective score is a weighted penalty score: lower is better when comparing repeated runs with the same month and unchanged inputs, but scores should not be compared across different months or inputs.
+
+The page shows:
 
 - Solver controls and recent run status
-- Calendar view
+- A read-only, color-coded calendar using the call shift's start date
 - Workload summary
-  - Month shows only the selected month, L3M shows the selected month plus the prior two months, and YTD shows January through the selected month.
-- Preference violations
-- Manual reassign and swap tools
+	- Month shows only the selected month, L3M shows the selected month plus the prior two months, and YTD shows January through the selected month. Only saved assignments contribute.
+	- Weekday means Monday through Thursday. Friday, Saturday, and Sunday are displayed separately.
+	- Monday-Thursday, Friday, Saturday, and Sunday counts are balanced independently after raw total shifts. Category-specific surplus from the prior three months also affects the schedule.
+	- Workload Points use Monday-Thursday = 1, Friday = 1.5, Saturday = 2, and Sunday = 1.5. This column summarizes the final mix; it is not a separate aggregate solver target.
+- Soft prefer-off violations
+- Manual reassign and swap tools for unlocked assignments
 - ICS export
 - Google Calendar publishing
 
-Manual reassignments and swaps validate hard unavailable conflicts before saving.
+Edit Assignment defaults to Swap; choose Reassign to change only one shift. Before saving, the form reports whether the proposed edit would assign someone on a prefer-off date or remove someone from a prefer-work date. Soft preference impacts remain allowed with a warning, while hard conflicts must be resolved. The optional hard assign setting creates dated hard assign requests that remain in effect on future solver runs.
+
+### Wiping a Local Schedule
+
+**Wipe current schedule** permanently deletes only the selected month's local assignments, including manual edits. It does not delete residents, availability/preferences, recurring preferences, scheduling rules, hard assign requests, or solver run history. It also does not delete Google Calendar events. If the schedule was published, use **Wipe Scheduler Events** in the Google Calendar section before wiping the local schedule.
 
 ## Calendar Export and Publishing
 
@@ -85,4 +99,8 @@ ICS export downloads a single calendar file named for the selected year-month ca
 
 Google Calendar publishing writes the current month to a selected writable Google Calendar. Publishing deletes prior Residency Scheduler events for the selected month and calendar before inserting the current assignments. The app identifies its own events using private Google Calendar metadata, so it does not wipe unrelated calendar events.
 
-The selected Google Calendar is remembered as your default for future months. Use Wipe Scheduler Events when you need to remove the app-generated events for the selected year-month without publishing a replacement schedule.
+The selected Google Calendar is remembered as your default for future months. Google events are all-day events on the shift start date. Residents with saved email addresses are added as attendees and receive Google invitation/update emails. Use **Refresh Google Calendar status** to recheck the selected calendar. Use **Wipe Scheduler Events** when you need to remove app-generated events for the selected year-month without changing the local schedule or publishing a replacement.
+
+ICS export is a one-time download, not a live sync. Its events use the 6:00 PM start and 7:00 AM next-day end times.
+
+Developer details retains the latest solver result and warnings for troubleshooting, including after a local schedule wipe.

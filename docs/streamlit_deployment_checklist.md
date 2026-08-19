@@ -15,6 +15,13 @@
 [connections.neon]
 url = "postgresql+psycopg://USER:PASSWORD@HOST/DBNAME?sslmode=require"
 
+[auth]
+redirect_uri = "https://huntingtonhealthresidencyscheduler.streamlit.app/oauth2callback"
+cookie_secret = "strong-random-cookie-signing-secret"
+client_id = "..."
+client_secret = "..."
+server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
+
 [google]
 client_id = "..."
 client_secret = "..."
@@ -30,12 +37,13 @@ The deployed app can be public, but scheduler access is limited after Google sig
 - Enable the Google Calendar API in the same Google Cloud project.
 - OAuth consent app domain:
   - `huntingtonhealthresidencyscheduler.streamlit.app`
-- OAuth consent policy links after this branch is pushed:
-  - Privacy Policy: `https://github.com/ACB-prgm/ResidencyScheduler/blob/codex/deployment-prep/docs/privacy_policy.md`
-  - Terms of Service: `https://github.com/ACB-prgm/ResidencyScheduler/blob/codex/deployment-prep/docs/terms_of_service.md`
+- OAuth consent policy links:
+  - Privacy Policy: `https://github.com/ACB-prgm/ResidencyScheduler/blob/main/docs/privacy.md`
+  - Terms of Service: `https://github.com/ACB-prgm/ResidencyScheduler/blob/main/docs/terms.md`
 - Add authorized JavaScript origin:
   - `https://huntingtonhealthresidencyscheduler.streamlit.app`
-- Add authorized redirect URI:
+- Add authorized redirect URIs:
+  - `https://huntingtonhealthresidencyscheduler.streamlit.app/oauth2callback`
   - `https://huntingtonhealthresidencyscheduler.streamlit.app/component/streamlit_oauth.authorize_button`
 - OAuth consent screen scopes:
   - `openid`

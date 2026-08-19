@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import streamlit as st
 
-from residency_scheduler.auth import require_google_auth
+from residency_scheduler.auth import render_authenticated_sidebar, require_google_auth
+from residency_scheduler.cache import ensure_database_initialized
 
 st.set_page_config(
 	page_title="Residency Scheduler",
@@ -10,7 +11,8 @@ st.set_page_config(
 	layout="wide",
 )
 
-require_google_auth(render_sidebar=False)
+ensure_database_initialized()
+auth_session = require_google_auth(render_sidebar=False)
 
 navigation = st.navigation(
 	[
@@ -21,4 +23,5 @@ navigation = st.navigation(
 		st.Page("pages/4_Generate_Schedule.py", title="Generate Schedule"),
 	]
 )
+render_authenticated_sidebar(auth_session)
 navigation.run()

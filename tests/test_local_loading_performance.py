@@ -69,14 +69,18 @@ def test_availability_cache_path_loads_only_request_dependencies(monkeypatch):
 	monkeypatch.setattr(cache.repository, "get_resident_options", lambda active_only=True: calls.append("options") or {})
 	monkeypatch.setattr(cache.repository, "get_period", lambda period_id: calls.append("period") or {"id": period_id})
 	monkeypatch.setattr(cache.repository, "get_schedule_requests_for_editor", lambda period_id: calls.append("requests") or pd.DataFrame())
+	monkeypatch.setattr(cache.repository, "get_hard_schedule_requests_for_conflict_check", lambda: calls.append("hard_requests") or pd.DataFrame())
+	monkeypatch.setattr(cache.repository, "get_recurring_preferences_for_editor", lambda: calls.append("recurring") or pd.DataFrame())
 	cache.clear_all_data_caches()
 
 	cache.get_cached_residents(active_only=True)
 	cache.get_cached_resident_options(active_only=True)
 	cache.get_cached_period(1)
 	cache.get_cached_schedule_requests_for_editor(1)
+	cache.get_cached_hard_schedule_requests_for_conflict_check()
+	cache.get_cached_recurring_preferences_for_editor()
 
-	assert calls == ["residents:True", "options", "period", "requests"]
+	assert calls == ["residents:True", "options", "period", "requests", "hard_requests", "recurring"]
 
 
 def test_generate_cache_path_loads_full_review_context(monkeypatch):
@@ -130,3 +134,115 @@ def test_month_cache_clear_removes_versioned_remote_cache_entries(tmp_path, monk
 	assert calls["count"] == 2
 	assert int(first.iloc[0]["value"]) == 1
 	assert int(second.iloc[0]["value"]) == 2
+
+
+def test_resident_access_snapshot_reuses_cached_roster(tmp_path, monkeypatch):
+	monkeypatch.setenv("RESIDENCY_SCHEDULER_DB", str(tmp_path / "access-cache.sqlite"))
+	monkeypatch.setattr(cache, "primary_database_is_remote", lambda: False)
+	calls = {"count": 0}
+
+	def load_residents(active_only=False):
+		assert active_only is False
+		calls["count"] += 1
+		return pd.DataFrame(
+			[
+				{"email": " Ada@Example.com "},
+				{"email": "ada@example.com"},
+				{"email": ""},
+			]
+		)
+
+	monkeypatch.setattr(cache.repository, "get_residents", load_residents)
+	cache.clear_all_data_caches()
+
+	first = cache.get_cached_resident_access_snapshot()
+	second = cache.get_cached_resident_access_snapshot()
+
+	assert calls["count"] == 1
+	assert first == second
+	assert first["emails"] == ("ada@example.com",)
+	assert first["fingerprint"]
+
+
+def test_reference_cache_clear_refreshes_resident_access_snapshot(tmp_path, monkeypatch):
+	monkeypatch.setenv("RESIDENCY_SCHEDULER_DB", str(tmp_path / "access-refresh.sqlite"))
+	monkeypatch.setattr(cache, "primary_database_is_remote", lambda: False)
+	emails = ["first@example.com"]
+
+	monkeypatch.setattr(
+		cache.repository,
+		"get_residents",
+		lambda active_only=False: pd.DataFrame([{"email": value} for value in emails]),
+	)
+	cache.clear_all_data_caches()
+
+	first = cache.get_cached_resident_access_snapshot()
+	emails[:] = ["second@example.com"]
+	still_cached = cache.get_cached_resident_access_snapshot()
+	cache.clear_reference_data_cache()
+	refreshed = cache.get_cached_resident_access_snapshot()
+
+	assert still_cached == first
+	assert refreshed["emails"] == ("second@example.com",)
+	assert refreshed["fingerprint"] != first["fingerprint"]
+
+
+def test_request_cache_clear_keeps_unrelated_month_cache_entries(tmp_path, monkeypatch):
+	cache_path = tmp_path / "request-cache.sqlite"
+	monkeypatch.setattr(cache, "primary_database_is_remote", lambda: True)
+	monkeypatch.setattr(cache, "get_cache_db_path", lambda: cache_path)
+	calls = {"requests": 0, "context": 0, "assignments": 0}
+
+	def load(name):
+		calls[name] += 1
+		return pd.DataFrame([{"value": calls[name]}])
+
+	cache._read_through_local_cache("month:1:requests_editor", lambda: load("requests"))
+	cache._read_through_local_cache("month:1:context", lambda: load("context"))
+	cache._read_through_local_cache("month:1:assignments", lambda: load("assignments"))
+
+	cache.clear_schedule_request_cache()
+
+	cache._read_through_local_cache("month:1:requests_editor", lambda: load("requests"))
+	cache._read_through_local_cache("month:1:context", lambda: load("context"))
+	cache._read_through_local_cache("month:1:assignments", lambda: load("assignments"))
+
+	assert calls == {"requests": 2, "context": 2, "assignments": 1}
+
+
+def test_request_cache_clear_refreshes_hard_conflict_snapshot(tmp_path, monkeypatch):
+	cache_path = tmp_path / "hard-request-cache.sqlite"
+	monkeypatch.setattr(cache, "primary_database_is_remote", lambda: True)
+	monkeypatch.setattr(cache, "get_cache_db_path", lambda: cache_path)
+	calls = {"hard_requests": 0, "assignments": 0}
+
+	def load(name):
+		calls[name] += 1
+		return pd.DataFrame([{"value": calls[name]}])
+
+	cache._read_through_local_cache("reference:hard_schedule_requests", lambda: load("hard_requests"))
+	cache._read_through_local_cache("month:1:assignments", lambda: load("assignments"))
+	cache.clear_schedule_request_cache()
+	cache._read_through_local_cache("reference:hard_schedule_requests", lambda: load("hard_requests"))
+	cache._read_through_local_cache("month:1:assignments", lambda: load("assignments"))
+
+	assert calls == {"hard_requests": 2, "assignments": 1}
+
+
+def test_request_cache_clear_refreshes_recurring_preferences(tmp_path, monkeypatch):
+	cache_path = tmp_path / "recurring-cache.sqlite"
+	monkeypatch.setattr(cache, "primary_database_is_remote", lambda: True)
+	monkeypatch.setattr(cache, "get_cache_db_path", lambda: cache_path)
+	calls = {"recurring": 0, "assignments": 0}
+
+	def load(name):
+		calls[name] += 1
+		return pd.DataFrame([{"value": calls[name]}])
+
+	cache._read_through_local_cache("reference:recurring_preferences_editor", lambda: load("recurring"))
+	cache._read_through_local_cache("month:1:assignments", lambda: load("assignments"))
+	cache.clear_schedule_request_cache()
+	cache._read_through_local_cache("reference:recurring_preferences_editor", lambda: load("recurring"))
+	cache._read_through_local_cache("month:1:assignments", lambda: load("assignments"))
+
+	assert calls == {"recurring": 2, "assignments": 1}

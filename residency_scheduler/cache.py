@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import pickle
 import sqlite3
 from collections.abc import Callable
@@ -13,8 +14,8 @@ from residency_scheduler.db import get_cache_db_path, get_database_url, init_db,
 from residency_scheduler import repository
 
 T = TypeVar("T")
-CACHE_KEY_VERSION = "v4"
-SCHEMA_INIT_VERSION = "schedule-requests-global-v1"
+CACHE_KEY_VERSION = "v6"
+SCHEMA_INIT_VERSION = "recurring-preferences-v1"
 
 
 def ensure_database_initialized() -> bool:
@@ -68,6 +69,26 @@ def _get_cached_resident_options(database_url: str, active_only: bool = True) ->
 	)
 
 
+def get_cached_resident_access_snapshot() -> dict[str, object]:
+	return _get_cached_resident_access_snapshot(get_database_url())
+
+
+@st.cache_data(show_spinner=False)
+def _get_cached_resident_access_snapshot(database_url: str) -> dict[str, object]:
+	residents = _get_cached_residents(database_url, active_only=False)
+	emails = tuple(
+		sorted(
+			{
+				str(value).strip().casefold()
+				for value in residents.get("email", pd.Series(dtype="object")).tolist()
+				if str(value or "").strip()
+			}
+		)
+	)
+	fingerprint = hashlib.sha256("\n".join(emails).encode("utf-8")).hexdigest()
+	return {"emails": emails, "fingerprint": fingerprint}
+
+
 def get_cached_period(period_id: int) -> dict:
 	return _get_cached_period(get_database_url(), period_id)
 
@@ -98,6 +119,42 @@ def _get_cached_schedule_requests_for_editor(database_url: str, period_id: int) 
 	return _read_through_local_cache(
 		f"month:{period_id}:requests_editor",
 		lambda: repository.get_schedule_requests_for_editor(period_id),
+	)
+
+
+def get_cached_expanded_schedule_requests(period_id: int) -> pd.DataFrame:
+	return _get_cached_expanded_schedule_requests(get_database_url(), period_id)
+
+
+@st.cache_data(show_spinner=False)
+def _get_cached_expanded_schedule_requests(database_url: str, period_id: int) -> pd.DataFrame:
+	return _read_through_local_cache(
+		f"month:{period_id}:expanded_requests",
+		lambda: repository.get_expanded_schedule_requests(period_id),
+	)
+
+
+def get_cached_hard_schedule_requests_for_conflict_check() -> pd.DataFrame:
+	return _get_cached_hard_schedule_requests_for_conflict_check(get_database_url())
+
+
+@st.cache_data(show_spinner=False)
+def _get_cached_hard_schedule_requests_for_conflict_check(database_url: str) -> pd.DataFrame:
+	return _read_through_local_cache(
+		"reference:hard_schedule_requests",
+		repository.get_hard_schedule_requests_for_conflict_check,
+	)
+
+
+def get_cached_recurring_preferences_for_editor() -> pd.DataFrame:
+	return _get_cached_recurring_preferences_for_editor(get_database_url())
+
+
+@st.cache_data(show_spinner=False)
+def _get_cached_recurring_preferences_for_editor(database_url: str) -> pd.DataFrame:
+	return _read_through_local_cache(
+		"reference:recurring_preferences_editor",
+		repository.get_recurring_preferences_for_editor,
 	)
 
 
@@ -189,13 +246,37 @@ def clear_reference_data_cache() -> None:
 	_get_cached_calendar_months.clear()
 	_get_cached_residents.clear()
 	_get_cached_resident_options.clear()
+	_get_cached_resident_access_snapshot.clear()
+	_get_cached_recurring_preferences_for_editor.clear()
+	_get_cached_hard_schedule_requests_for_conflict_check.clear()
 	_clear_local_cache_prefix("reference:")
+
+
+def clear_schedule_request_cache() -> None:
+	"""Clear request-derived views without evicting unrelated month data."""
+	_get_cached_schedule_requests_for_editor.clear()
+	_get_cached_expanded_schedule_requests.clear()
+	_get_cached_recurring_preferences_for_editor.clear()
+	_get_cached_hard_schedule_requests_for_conflict_check.clear()
+	_get_cached_preference_violations.clear()
+	_get_cached_month_context.clear()
+	_clear_local_cache_patterns(
+		[
+			"%:requests_editor",
+			"%:expanded_requests",
+			"%:preference_violations",
+			"%:context",
+			"%:reference:recurring_preferences_editor",
+			"%:reference:hard_schedule_requests",
+		]
+	)
 
 
 def clear_month_data_cache() -> None:
 	_get_cached_or_create_schedule_period.clear()
 	_get_cached_period.clear()
 	_get_cached_schedule_requests_for_editor.clear()
+	_get_cached_expanded_schedule_requests.clear()
 	_get_cached_schedule_rules_for_editor.clear()
 	_get_cached_assignments.clear()
 	_get_cached_workload_summary.clear()
@@ -262,6 +343,15 @@ def _clear_local_cache_prefix(prefix: str) -> None:
 			""",
 			(f"{prefix}%", f"%:{prefix}%"),
 		)
+
+
+def _clear_local_cache_patterns(patterns: list[str]) -> None:
+	if not primary_database_is_remote() or not patterns:
+		return
+	with _local_cache_connection() as conn:
+		_ensure_local_cache_schema(conn)
+		where = " OR ".join("cache_key LIKE ?" for _ in patterns)
+		conn.execute(f"DELETE FROM local_cache WHERE {where}", tuple(patterns))
 
 
 def _local_cache_connection() -> sqlite3.Connection:

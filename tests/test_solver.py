@@ -5,8 +5,9 @@ from collections import Counter
 import pandas as pd
 import pytest
 
-from residency_scheduler.db import init_db
+from residency_scheduler.db import get_connection, init_db
 from residency_scheduler.repository import (
+	create_recurring_preference,
 	create_schedule_request,
 	get_or_create_schedule_period,
 	get_assignments,
@@ -18,6 +19,7 @@ from residency_scheduler.repository import (
 	save_residents,
 )
 from residency_scheduler.solver import solve_period
+from residency_scheduler.shift_categories import shift_category_for_weekday
 
 
 @pytest.fixture
@@ -224,6 +226,28 @@ def test_hard_assign_conflict_with_hard_unavailable_is_rejected(isolated_db):
 		)
 
 
+def test_solver_conflict_warnings_use_resident_names(isolated_db):
+	add_residents(["Ada", "Ben", "Cam", "Dee"], max_shifts=10)
+	period_id = get_or_create_schedule_period(2026, 8, required_count=1)
+	with get_connection() as conn:
+		conn.executemany(
+			"""
+			INSERT INTO schedule_requests (resident_id, start_date, end_date, request_type, priority, reason)
+			VALUES (?, ?, ?, ?, ?, ?)
+			""",
+			[
+				(1, "2026-08-14", "2026-08-14", "prefer_work", "hard", "Must work"),
+				(1, "2026-08-14", "2026-08-14", "unavailable", "hard", "Unavailable"),
+			],
+		)
+
+	result = solve_period(period_id, max_time_seconds=5)
+
+	assert result.status == "INVALID_INPUT"
+	assert any("Hard request conflict: Ada must work on 2026-08-14" in warning for warning in result.warnings)
+	assert all("resident_id" not in warning for warning in result.warnings)
+
+
 def test_too_many_hard_assign_requests_on_one_date_is_rejected(isolated_db):
 	add_residents(["Ada", "Ben", "Cam"], max_shifts=12)
 	period_id = get_or_create_schedule_period(2026, 5, required_count=1)
@@ -241,6 +265,8 @@ def test_too_many_hard_assign_requests_on_one_date_is_rejected(isolated_db):
 
 	assert result.status == "INVALID_INPUT"
 	assert any("hard assign request" in warning for warning in result.warnings)
+	assert any("Ada" in warning and "Ben" in warning for warning in result.warnings)
+	assert all("resident_id" not in warning for warning in result.warnings)
 
 
 def test_max_shifts_can_make_schedule_infeasible(isolated_db):
@@ -251,6 +277,8 @@ def test_max_shifts_can_make_schedule_infeasible(isolated_db):
 
 	assert result.status == "INVALID_INPUT"
 	assert any("Configured max shifts" in warning for warning in result.warnings)
+	assert any("Ada" in warning and "Ben" in warning for warning in result.warnings)
+	assert all("resident_id" not in warning for warning in result.warnings)
 
 
 def test_preference_heavy_schedule_remains_feasible_and_reports_violations(isolated_db):
@@ -275,6 +303,107 @@ def test_preference_heavy_schedule_remains_feasible_and_reports_violations(isola
 	assert result.status in {"OPTIMAL", "FEASIBLE"}
 	assert len(result.assignments) == 28
 	assert set(get_preference_violations(period_id).columns) >= {"work_date", "resident_name", "request_type"}
+
+
+def test_recurring_preferences_expand_only_matching_weekdays_and_bounds(isolated_db):
+	add_residents(["Ada", "Ben", "Cam", "Dee"], max_shifts=12)
+	period_id = get_or_create_schedule_period(2026, 9, required_count=1)
+	create_recurring_preference(1, "prefer_off", 0, "2026-09-08", "2026-09-22", "Monday preference")
+
+	expanded = get_expanded_schedule_requests(period_id)
+	ada = expanded[(expanded["resident_id"] == 1) & (expanded["request_type"] == "prefer_off")]
+
+	assert ada["work_date"].tolist() == ["2026-09-14", "2026-09-21"]
+	assert set(ada["source"]) == {"recurring"}
+
+
+def test_dated_preference_overrides_recurring_on_same_date(isolated_db):
+	add_residents(["Ada", "Ben", "Cam", "Dee"], max_shifts=12)
+	period_id = get_or_create_schedule_period(2026, 9, required_count=1)
+	create_recurring_preference(1, "prefer_off", 0, "2026-09-01", None, "Recurring off")
+	create_schedule_request(1, "2026-09-14", "2026-09-14", "prefer_work", "soft", "Dated work")
+
+	expanded = get_expanded_schedule_requests(period_id)
+	selected = expanded[(expanded["resident_id"] == 1) & (expanded["work_date"] == "2026-09-14")]
+
+	assert len(selected) == 1
+	assert selected.iloc[0]["request_type"] == "prefer_work"
+	assert selected.iloc[0]["source"] == "dated"
+
+
+def test_duplicate_dated_preferences_collapse_and_hard_wins(isolated_db):
+	add_residents(["Ada", "Ben", "Cam", "Dee"], max_shifts=12)
+	period_id = get_or_create_schedule_period(2026, 9, required_count=1)
+	create_schedule_request(1, "2026-09-14", "2026-09-14", "prefer_off", "soft", "Soft duplicate")
+	create_schedule_request(1, "2026-09-14", "2026-09-14", "prefer_off", "hard", "Hard duplicate")
+
+	expanded = get_expanded_schedule_requests(period_id)
+	selected = expanded[
+		(expanded["resident_id"] == 1)
+		& (expanded["work_date"] == "2026-09-14")
+		& (expanded["request_type"] == "prefer_off")
+	]
+
+	assert len(selected) == 1
+	assert selected.iloc[0]["priority"] == "hard"
+	assert selected.iloc[0]["reason"] == "Hard duplicate"
+
+
+def test_duplicate_recurring_preferences_create_one_effective_penalty_and_violation(isolated_db):
+	add_residents(["Ada", "Ben"], max_shifts=31)
+	period_id = get_or_create_schedule_period(2026, 9, required_count=2)
+	create_recurring_preference(1, "prefer_off", 0, "2026-09-01", None, "First")
+	create_recurring_preference(1, "prefer_off", 0, "2026-09-01", None, "Second")
+
+	expanded = get_expanded_schedule_requests(period_id)
+	monday = expanded[
+		(expanded["resident_id"] == 1)
+		& (expanded["work_date"] == "2026-09-07")
+		& (expanded["request_type"] == "prefer_off")
+	]
+	assert len(monday) == 1
+
+	result = solve_period(period_id, max_time_seconds=5)
+	violations = get_preference_violations(period_id)
+	assert result.status in {"OPTIMAL", "FEASIBLE"}
+	assert len(violations[(violations["resident_name"] == "Ada") & (violations["work_date"].astype(str) == "2026-09-07")]) == 1
+
+
+def test_hard_dated_prefer_work_and_prefer_off_are_enforced(isolated_db):
+	add_residents(["Ada", "Ben", "Cam", "Dee"], max_shifts=12)
+	period_id = get_or_create_schedule_period(2026, 9, required_count=1)
+	create_schedule_request(1, "2026-09-10", "2026-09-10", "prefer_work", "hard", "Must work")
+	create_schedule_request(1, "2026-09-11", "2026-09-11", "prefer_off", "hard", "Must be off")
+
+	result = solve_period(period_id, max_time_seconds=5)
+	assignments = assignments_by_date(period_id)
+
+	assert result.status in {"OPTIMAL", "FEASIBLE"}
+	assert assignments["2026-09-10"] == [1]
+	assert 1 not in assignments["2026-09-11"]
+	stored = get_assignments(period_id)
+	forced = stored[(stored["work_date"].astype(str) == "2026-09-10") & (stored["resident_id"].astype(int) == 1)].iloc[0]
+	assert forced["source"] == "request"
+	assert int(forced["is_locked"]) == 1
+
+
+def test_inactive_resident_preferences_do_not_enter_solver_inputs(isolated_db):
+	add_residents(["Ada", "Ben", "Cam", "Dee"], max_shifts=12)
+	period_id = get_or_create_schedule_period(2026, 9, required_count=1)
+	create_recurring_preference(1, "prefer_off", 0, "2026-09-01", None, "Recurring")
+	create_schedule_request(1, "2026-09-14", "2026-09-14", "prefer_off", "soft", "Dated")
+	residents = pd.DataFrame(
+		[
+			{"id": 1, "name": "Ada", "email": "ada@example.com", "max_shifts": 12, "min_shifts": None, "weight": 1, "active": 0},
+			{"id": 2, "name": "Ben", "email": "ben@example.com", "max_shifts": 12, "min_shifts": None, "weight": 1, "active": 1},
+			{"id": 3, "name": "Cam", "email": "cam@example.com", "max_shifts": 12, "min_shifts": None, "weight": 1, "active": 1},
+			{"id": 4, "name": "Dee", "email": "dee@example.com", "max_shifts": 12, "min_shifts": None, "weight": 1, "active": 1},
+		]
+	)
+	save_residents(residents)
+
+	expanded = get_expanded_schedule_requests(period_id)
+	assert 1 not in set(expanded["resident_id"].astype(int).tolist())
 
 
 def test_back_to_back_is_avoided_when_enough_residents_exist(isolated_db):
@@ -308,25 +437,47 @@ def test_total_shift_surplus_goes_to_lower_weight_residents(isolated_db):
 	assert sum(counts[name] == 5 for name in low_weight) == 3
 
 
-def test_weekend_surplus_goes_to_lower_weight_residents(isolated_db):
+def test_day_categories_are_balanced_independently(isolated_db):
+	names = ["Jasmine Park", "Rossi", "Jacobs", "Prado", "Reddy", "Ruiz", "Zhao"]
+	add_residents(names, max_shifts=10)
+	period_id = get_or_create_schedule_period(2026, 8, required_count=1)
+
+	result = solve_period(period_id, max_time_seconds=10, random_seed=1)
+
+	assert result.status in {"OPTIMAL", "FEASIBLE"}
+	assignments = get_assignments(period_id)
+	assignments["category"] = pd.to_datetime(assignments["work_date"]).dt.weekday.map(
+		shift_category_for_weekday
+	)
+	category_counts = assignments.groupby(["resident_name", "category"]).size().unstack(fill_value=0)
+	shift_counts = assignments.groupby("resident_name").size()
+
+	assert int(shift_counts.max() - shift_counts.min()) <= 1
+	for category in ["weekday", "friday", "saturday", "sunday"]:
+		assert int(category_counts[category].max() - category_counts[category].min()) <= 1
+	park_categories = set(assignments.loc[assignments["resident_name"] == "Jasmine Park", "category"])
+	assert park_categories - {"friday", "sunday"}
+
+
+def test_category_surplus_uses_pgy_protection_by_category(isolated_db):
 	low_weight = ["Low 1", "Low 2", "Low 3", "Low 4"]
 	high_weight = ["High 1", "High 2", "High 3"]
 	names = low_weight + high_weight
 	add_residents(names, max_shifts=10, weights={name: 1 for name in low_weight} | {name: 5 for name in high_weight})
-	period_id = get_or_create_schedule_period(2026, 5, required_count=1)
+	period_id = get_or_create_schedule_period(2026, 2, required_count=1)
 
-	result = solve_period(period_id, max_time_seconds=10)
+	result = solve_period(period_id, max_time_seconds=10, random_seed=1)
 
 	assert result.status in {"OPTIMAL", "FEASIBLE"}
 	assignments = get_assignments(period_id)
-	weekend_assignments = assignments[pd.to_datetime(assignments["work_date"]).dt.weekday >= 4]
-	weekend_counts = weekend_assignments.groupby("resident_name").size().to_dict()
-	for name in names:
-		weekend_counts.setdefault(name, 0)
+	assignments["category"] = pd.to_datetime(assignments["work_date"]).dt.weekday.map(
+		shift_category_for_weekday
+	)
+	shift_counts = assignments.groupby("resident_name").size().to_dict()
+	saturday_residents = set(assignments.loc[assignments["category"] == "saturday", "resident_name"])
 
-	assert sorted(weekend_counts.values()) == [2, 2, 2, 2, 2, 2, 3]
-	assert all(weekend_counts[name] == 2 for name in high_weight)
-	assert sum(weekend_counts[name] == 3 for name in low_weight) == 1
+	assert set(shift_counts.values()) == {4}
+	assert saturday_residents == set(low_weight)
 
 
 def test_seeded_random_tie_break_can_rotate_equal_cost_leftover_shift(isolated_db):
@@ -357,7 +508,7 @@ def test_prior_total_surplus_discourages_same_current_surplus_resident(isolated_
 	assert sorted(counts.values()) == [6, 6, 6, 6, 7]
 
 
-def test_prior_weekend_surplus_discourages_same_current_weekend_surplus_resident(isolated_db):
+def test_prior_category_surplus_discourages_same_current_category_surplus_resident(isolated_db):
 	add_residents(["Ada", "Ben", "Cam"], max_shifts=14)
 	prior_id = get_or_create_schedule_period(2026, 7, required_count=1)
 	current_id = get_or_create_schedule_period(2026, 8, required_count=1)
@@ -365,36 +516,11 @@ def test_prior_weekend_surplus_discourages_same_current_weekend_surplus_resident
 		prior_id,
 		[
 			{"work_date": "2026-07-04", "resident_id": 1},
-			{"work_date": "2026-07-05", "resident_id": 1},
 			{"work_date": "2026-07-11", "resident_id": 1},
-			{"work_date": "2026-07-12", "resident_id": 1},
-			{"work_date": "2026-07-18", "resident_id": 2},
-			{"work_date": "2026-07-19", "resident_id": 2},
-			{"work_date": "2026-07-25", "resident_id": 3},
-			{"work_date": "2026-07-26", "resident_id": 3},
-			{"work_date": "2026-07-01", "resident_id": 2},
-			{"work_date": "2026-07-02", "resident_id": 2},
 			{"work_date": "2026-07-03", "resident_id": 2},
-			{"work_date": "2026-07-06", "resident_id": 2},
-			{"work_date": "2026-07-07", "resident_id": 2},
-			{"work_date": "2026-07-08", "resident_id": 2},
-			{"work_date": "2026-07-09", "resident_id": 2},
 			{"work_date": "2026-07-10", "resident_id": 2},
-			{"work_date": "2026-07-13", "resident_id": 2},
-			{"work_date": "2026-07-14", "resident_id": 3},
-			{"work_date": "2026-07-15", "resident_id": 3},
-			{"work_date": "2026-07-16", "resident_id": 3},
-			{"work_date": "2026-07-17", "resident_id": 3},
-			{"work_date": "2026-07-20", "resident_id": 3},
-			{"work_date": "2026-07-21", "resident_id": 3},
-			{"work_date": "2026-07-22", "resident_id": 3},
-			{"work_date": "2026-07-23", "resident_id": 3},
-			{"work_date": "2026-07-24", "resident_id": 3},
-			{"work_date": "2026-07-27", "resident_id": 1},
-			{"work_date": "2026-07-28", "resident_id": 1},
-			{"work_date": "2026-07-29", "resident_id": 1},
-			{"work_date": "2026-07-30", "resident_id": 1},
-			{"work_date": "2026-07-31", "resident_id": 1},
+			{"work_date": "2026-07-05", "resident_id": 3},
+			{"work_date": "2026-07-12", "resident_id": 3},
 		],
 	)
 
@@ -402,10 +528,16 @@ def test_prior_weekend_surplus_discourages_same_current_weekend_surplus_resident
 
 	assert result.status in {"OPTIMAL", "FEASIBLE"}
 	assignments = get_assignments(current_id)
-	weekend_assignments = assignments[pd.to_datetime(assignments["work_date"]).dt.weekday >= 4]
-	weekend_counts = weekend_assignments.groupby("resident_id").size().to_dict()
-	assert weekend_counts[1] == 4
-	assert sorted(weekend_counts.values()) == [4, 5, 5]
+	assignments["category"] = pd.to_datetime(assignments["work_date"]).dt.weekday.map(
+		shift_category_for_weekday
+	)
+	saturday_counts = (
+		assignments[assignments["category"] == "saturday"]
+		.groupby("resident_id")
+		.size()
+		.to_dict()
+	)
+	assert saturday_counts == {1: 1, 2: 2, 3: 2}
 
 
 def test_exactly_two_fridays_weekday_count_rule_is_enforced(isolated_db):
@@ -677,3 +809,5 @@ def test_pair_rule_impossible_target_is_invalid_input(isolated_db):
 
 	assert result.status == "INVALID_INPUT"
 	assert any("available adjacent weekday pair" in warning for warning in result.warnings)
+	assert any("City Hope" in warning for warning in result.warnings)
+	assert all("resident_id" not in warning for warning in result.warnings)
