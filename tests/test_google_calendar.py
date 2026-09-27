@@ -153,7 +153,7 @@ def test_publish_period_wipes_existing_events_and_stores_new_event_ids(isolated_
 	assert service.deleted == [("calendar@example.org", "old-event")]
 	assert updated["google_event_id"].tolist() == ["created-1", "created-2"]
 	assert len(service.inserted) == 2
-	assert service.inserted[0][2] == "all"
+	assert service.inserted[0][2] == "externalOnly"
 	assert service.inserted[0][1]["attendees"] == [{"email": "ada@example.com", "displayName": "Ada"}]
 	assert service.event_list_calls[0]["privateExtendedProperty"] == [
 		"rs_app=residency_scheduler",
@@ -216,7 +216,7 @@ def test_publish_period_batches_deletes_and_inserts_when_available(isolated_goog
 	assert result.inserted_count == 2
 	assert service.batch_execute_count == 2
 	assert service.deleted == [("calendar@example.org", "old-1"), ("calendar@example.org", "old-2")]
-	assert service.inserted[0][2] == "all"
+	assert service.inserted[0][2] == "externalOnly"
 	assert updated["google_event_id"].tolist() == ["batch-created-1", "batch-created-2"]
 
 

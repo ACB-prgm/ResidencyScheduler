@@ -227,7 +227,7 @@ def _insert_assignment_events(service, calendar_id: str, period: dict[str, Any],
 		for assignment in assignment_rows:
 			event = build_assignment_event(period, assignment, time_zone=time_zone)
 			batch.add(
-				service.events().insert(calendarId=calendar_id, body=event, sendUpdates="all"),
+				service.events().insert(calendarId=calendar_id, body=event, sendUpdates="externalOnly"),
 				request_id=f"insert-{int(assignment.id)}",
 			)
 		batch.execute()
@@ -239,7 +239,7 @@ def _insert_assignment_events(service, calendar_id: str, period: dict[str, Any],
 
 	for assignment in assignment_rows:
 		event = build_assignment_event(period, assignment, time_zone=time_zone)
-		created = service.events().insert(calendarId=calendar_id, body=event, sendUpdates="all").execute()
+		created = service.events().insert(calendarId=calendar_id, body=event, sendUpdates="externalOnly").execute()
 		event_id = str(created.get("id") or "")
 		if event_id:
 			update_assignment_google_event_id(int(assignment.id), event_id)
