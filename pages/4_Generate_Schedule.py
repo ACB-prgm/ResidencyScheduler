@@ -161,7 +161,7 @@ render_user_guide(
 	- **Edit Assignment** defaults to swapping two unlocked assignments, or you can choose Reassign for a single shift. The form warns when the proposed change would assign someone on a prefer-off date or remove someone from a prefer-work date. Soft preference impacts remain allowed; hard conflicts must be resolved before saving. Selecting "Create hard assign request" also saves dated hard assign requests that remain in effect on future solver runs and survive a local schedule wipe.
 
 	### Publish and troubleshoot
-	- **Google Calendar publishing** remembers your selected writable calendar. Publishing deletes only prior Residency Scheduler events for this month in that calendar, then writes the current schedule as all-day events. Residents with email addresses are added as attendees and receive Google invitation/update emails.
+	- **Google Calendar publishing** remembers your selected writable calendar. Publishing deletes only prior Residency Scheduler events for this month in that calendar, then writes the current schedule as all-day events. Residents with email addresses are added as attendees. Google Calendar attendees do not receive invitation/update emails from publishing; external calendar attendees still receive them.
 	- **Refresh Google Calendar status** checks the calendar again. **Wipe Scheduler Events** removes only app-generated events for this month from the selected Google Calendar and does not change the local schedule.
 	- **ICS export** downloads a one-time calendar file with 6:00 PM-7:00 AM shifts. Importing it does not create a live sync.
 	- **Developer details** retains the latest solver status, score, and warnings for troubleshooting, even after local assignments are wiped.
